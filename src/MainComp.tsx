@@ -1,47 +1,35 @@
-import { AbsoluteFill, interpolate, spring, useCurrentFrame, useVideoConfig } from "remotion";
-import { COLORS, TITLE, SUBTITLE } from "./config";
+import { AbsoluteFill, Sequence } from "remotion";
+import { COLORS, FPS, HABITS, HABIT_SECONDS, INTRO, OUTRO } from "./config";
+import { TitleScene } from "./scenes/TitleScene";
+import { HabitScene } from "./scenes/HabitScene";
 
 export const MainComp: React.FC = () => {
-  const frame = useCurrentFrame();
-  const { fps } = useVideoConfig();
-
-  const scale = spring({ frame, fps, config: { damping: 12 } });
-  const subOpacity = interpolate(frame, [30, 60], [0, 1], {
-    extrapolateLeft: "clamp",
-    extrapolateRight: "clamp",
-  });
+  const introFrames = Math.round(INTRO.seconds * FPS);
+  const habitFrames = Math.round(HABIT_SECONDS * FPS);
+  const outroFrames = Math.round(OUTRO.seconds * FPS);
 
   return (
-    <AbsoluteFill
-      style={{
-        backgroundColor: COLORS.background,
-        justifyContent: "center",
-        alignItems: "center",
-        direction: "rtl",
-      }}
-    >
-      <div
-        style={{
-          color: COLORS.text,
-          fontSize: 120,
-          fontWeight: 800,
-          transform: `scale(${scale})`,
-          fontFamily: "sans-serif",
-        }}
+    <AbsoluteFill style={{ backgroundColor: COLORS.background }}>
+      <Sequence from={0} durationInFrames={introFrames}>
+        <TitleScene title={INTRO.title} subtitle={INTRO.subtitle} />
+      </Sequence>
+
+      {HABITS.map((h, i) => (
+        <Sequence
+          key={i}
+          from={introFrames + i * habitFrames}
+          durationInFrames={habitFrames}
+        >
+          <HabitScene index={i} total={HABITS.length} title={h.title} text={h.text} />
+        </Sequence>
+      ))}
+
+      <Sequence
+        from={introFrames + HABITS.length * habitFrames}
+        durationInFrames={outroFrames}
       >
-        {TITLE}
-      </div>
-      <div
-        style={{
-          color: COLORS.accent,
-          fontSize: 64,
-          marginTop: 40,
-          opacity: subOpacity,
-          fontFamily: "sans-serif",
-        }}
-      >
-        {SUBTITLE}
-      </div>
+        <TitleScene title={OUTRO.title} subtitle={OUTRO.subtitle} />
+      </Sequence>
     </AbsoluteFill>
   );
 };
