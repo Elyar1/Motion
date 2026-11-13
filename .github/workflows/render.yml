@@ -1,0 +1,38 @@
+name: Render Video
+
+on:
+  workflow_dispatch:
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Install browser
+        run: npx remotion browser ensure
+
+      - name: Render
+        run: npm run render
+
+      - name: Send to Telegram
+        run: |
+          curl -sS -X POST \
+            "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendVideo" \
+            -F chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -F video=@out/video.mp4 \
+            -F supports_streaming=true \
+            -F caption="رندر تموم شد ✅"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: video
+          path: out/video.mp4
+          retention-days: 7
