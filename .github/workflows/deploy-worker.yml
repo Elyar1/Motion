@@ -1,0 +1,49 @@
+name: Deploy Worker
+
+on:
+  push:
+    paths: ["worker/worker.js"]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Syntax check
+        run: |
+          cp worker/worker.js /tmp/w.mjs
+          node --check /tmp/w.mjs
+
+      - name: Upload to Cloudflare
+        env:
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          CF_WORKER_NAME: ${{ secrets.CF_WORKER_NAME }}
+        run: |
+          RESP=$(curl -sS -X PUT \
+            "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/workers/scripts/$CF_WORKER_NAME" \
+            -H "Authorization: Bearer $CF_API_TOKEN" \
+            -F 'metadata={"main_module":"worker.js","compatibility_date":"2025-11-01","keep_bindings":["secret_text","plain_text","kv_namespace","json"]};type=application/json' \
+            -F 'worker.js=@worker/worker.js;filename=worker.js;type=application/javascript+module')
+          echo "$RESP"
+          echo "$RESP" | grep -q '"success":true'
+
+      - name: Telegram OK
+        if: success()
+        env:
+          TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          curl -sS "https://api.telegram.org/bot$TOKEN/sendMessage" \
+            -d chat_id="$CHAT" -d text="✅ Worker آپدیت شد. /version بزن."
+
+      - name: Telegram failed
+        if: failure()
+        env:
+          TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          curl -sS "https://api.telegram.org/bot$TOKEN/sendMessage" \
+            -d chat_id="$CHAT" -d text="❌ آپدیت Worker خطا داد. لاگ رو توی تب Actions ببین."
