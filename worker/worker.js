@@ -7,7 +7,7 @@ const MODELS = {
   "groq-gpt-oss": { provider: "openai", base: "https://api.groq.com/openai/v1", keyName: "GROQ_API_KEY", id: "openai/gpt-oss-120b", label: "Groq GPT-OSS 120B", limit: 1000 },
   "openrouter-free": { provider: "openai", base: "https://openrouter.ai/api/v1", keyName: "OPENROUTER_API_KEY", id: "google/gemma-4-31b-it:free", label: "OpenRouter (Gemma رایگان)", limit: 50 },
 };
-const VERSION = "2026-11-14-e";
+const VERSION = "2026-11-15-f";
 const DEFAULT_MODEL = "g:gemini-3.5-flash-lite";
 const FALLBACK_GEMINI = ["gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-2.5-flash"];
 
@@ -291,6 +291,14 @@ async function githubPut(env, path, b64, message) {
   });
   if (!r.ok) throw new Error(`GitHub ${r.status}: ${(await r.text()).slice(0, 300)}`);
 }
+async function latestRun(env) {
+  const r = await fetch(
+    `https://api.github.com/repos/${env.GITHUB_REPO}/actions/workflows/render.yml/runs?per_page=1`,
+    { headers: ghHeaders(env) }
+  );
+  const d = await r.json();
+  return (d.workflow_runs || [])[0] || null;
+}
 async function dispatchRender(env) {
   const r = await fetch(
     `https://api.github.com/repos/${env.GITHUB_REPO}/actions/workflows/render.yml/dispatches`,
@@ -385,6 +393,7 @@ async function onCommand(env, chatId, st, cmd, text) {
         "/comp ← دیدن یا عوض کردن قالب (MainComp یا CaveFire)",
         "/models ← عوض کردن مدل (سقف رایگان هر مدل کنارش نوشته)",
         "/limits ← مصرف امروز، سقف مدل‌ها و آمار رندر",
+        "/status ← وضعیت آخرین رندر · /cancel ← لغو رندر در حال اجرا",
         "/new ← شروع گفتگوی جدید",
         "/version ← نسخه‌ی کد بات",
         "• فایل worker.js با کپشن worker ← خود بات رو آپدیت می‌کنه",
@@ -404,6 +413,29 @@ async function onCommand(env, chatId, st, cmd, text) {
     if (!name) return send(env, chatId, "قالب ناشناخته.\n\n" + list);
     await setComposition(env, name);
     return send(env, chatId, `✅ قالب رندر شد: ${name}\nبرای رندر /go بزن.`);
+  }
+  if (cmd === "/status") {
+    const run = await latestRun(env);
+    if (!run) return send(env, chatId, "هنوز رندری ثبت نشده.");
+    const started = new Date(run.run_started_at || run.created_at);
+    const end = run.status === "completed" ? new Date(run.updated_at) : new Date();
+    const sec = Math.max(0, Math.round((end - started) / 1000));
+    const state =
+      run.status === "queued" ? "در صف ⏳"
+      : run.status === "in_progress" ? "در حال اجرا 🎬"
+      : run.conclusion === "success" ? "تموم شد ✅"
+      : run.conclusion === "cancelled" ? "لغو شد ⛔"
+      : "خطا ❌";
+    return send(env, chatId, `آخرین رندر: ${state}\n⏱ ${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, "0")}\n${run.html_url}\n(درصد پیشرفت توی همون پیام زنده‌ی رندر دیده میشه)`);
+  }
+  if (cmd === "/cancel") {
+    const run = await latestRun(env);
+    if (!run || run.status === "completed") return send(env, chatId, "رندر در حال اجرایی نیست.");
+    const r = await fetch(`https://api.github.com/repos/${env.GITHUB_REPO}/actions/runs/${run.id}/cancel`, {
+      method: "POST",
+      headers: ghHeaders(env),
+    });
+    return send(env, chatId, r.status === 202 ? "⛔ درخواست لغو رندر ارسال شد." : `لغو نشد (HTTP ${r.status}).`);
   }
   if (cmd === "/version") {
     return send(env, chatId, "نسخه‌ی در حال اجرای بات: " + VERSION);
