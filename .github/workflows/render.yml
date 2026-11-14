@@ -65,10 +65,10 @@ jobs:
           CAP="$(cat out/caption.txt 2>/dev/null || echo 'رندر تموم شد ✅')"
           SIZE=$(stat -c%s out/video.mp4)
           if [ "$SIZE" -gt 49000000 ]; then
+            MSG=$(printf '%s\n%s' "$CAP" "ویدیو بیشتر از ۵۰ مگ شد. از تب Actions بخش Artifacts دانلودش کن.")
             curl -sS "https://api.telegram.org/bot$TOKEN/sendMessage" \
               -d chat_id="$CHAT" \
-              --data-urlencode "text=$CAP
-ویدیو بیشتر از ۵۰ مگ شد. از تب Actions بخش Artifacts دانلودش کن."
+              --data-urlencode "text=$MSG"
           else
             curl -sS -X POST "https://api.telegram.org/bot$TOKEN/sendVideo" \
               -F chat_id="$CHAT" \
