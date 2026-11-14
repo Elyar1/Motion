@@ -7,7 +7,7 @@ const MODELS = {
   "groq-gpt-oss": { provider: "openai", base: "https://api.groq.com/openai/v1", keyName: "GROQ_API_KEY", id: "openai/gpt-oss-120b", label: "Groq GPT-OSS 120B", limit: 1000 },
   "openrouter-free": { provider: "openai", base: "https://openrouter.ai/api/v1", keyName: "OPENROUTER_API_KEY", id: "google/gemma-4-31b-it:free", label: "OpenRouter (Gemma رایگان)", limit: 50 },
 };
-const VERSION = "2026-11-14-d";
+const VERSION = "2026-11-14-e";
 const DEFAULT_MODEL = "g:gemini-3.5-flash-lite";
 const FALLBACK_GEMINI = ["gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-2.5-flash"];
 
@@ -30,10 +30,17 @@ function resolve(key) {
   return resolve(DEFAULT_MODEL);
 }
 
-const CHAT_SYSTEM = `You help the user plan short vertical motion-graphic list videos in Persian (Farsi).
-Reply in casual, concise Persian. Video structure: a 4s intro, N list items (4.5s each), a 3.5s outro.
-So 30s = 5 items, 45s = 8 items, 60s = 12 items, 70s = 14 items.
-Help with topic, item titles and short texts. Keep each item title under 18 characters and text under 60 characters.`;
+const COMPOSITIONS = {
+  MainComp: "قالب لیستی (متن‌ها از چت و JSON ساخته میشن)",
+  CaveFire: "انیمیشن ثابت غارنشین و کشف آتش (متنش از چت عوض نمیشه)",
+};
+
+const CHAT_SYSTEM = `You are the chat assistant inside a Telegram bot that produces short vertical Persian (Farsi) motion-graphic videos.
+How the bot works: the user chats with you about a video; when they send /render the conversation is turned into JSON; /ok renders the video with Remotion on GitHub Actions and sends the MP4 back.
+Your job: discuss the topic and wording, write short scene texts, suggest improvements. Reply in casual, concise Persian.
+Limits (be honest about them): you cannot see or edit the user's code or GitHub repo, you cannot run anything, and you have no memory of earlier days. Never greet as if you were continuing earlier work and never ask the user for code. If the user wants new animations, scenes or code changes, say that code is written separately (by Claude) and sent to this bot as a .zip file, or as a single file with its repo path in the caption; you only handle the text content.
+Templates: "MainComp" = list video (4s intro, N items of 4.5s each, 3.5s outro; 30s = 5 items, 60s = 12 items, 70s = 14 items; item title under 18 chars, text under 60 chars). "CaveFire" = a fixed caveman-discovers-fire animation whose text cannot be changed from chat.
+Bot commands the user can use: /render, /ok, /go, /comp (switch template), /models (switch AI model), /limits (usage), /new (new chat).`;
 
 const JSON_SYSTEM = `You convert a conversation into the final content of a Persian motion-graphic video.
 Return ONLY valid JSON (no markdown) in exactly this shape:
@@ -296,6 +303,23 @@ async function dispatchRender(env) {
   if (r.status !== 204) throw new Error(`Dispatch ${r.status}: ${(await r.text()).slice(0, 300)}`);
 }
 
+async function getComposition(env) {
+  try {
+    const r = await fetch(
+      `https://api.github.com/repos/${env.GITHUB_REPO}/contents/composition.txt?ref=${env.GITHUB_BRANCH || "main"}`,
+      { headers: ghHeaders(env) }
+    );
+    if (!r.ok) return "MainComp";
+    const d = await r.json();
+    return atob(d.content.replace(/\n/g, "")).trim() || "MainComp";
+  } catch (e) {
+    return "MainComp";
+  }
+}
+function setComposition(env, name) {
+  return githubPut(env, "composition.txt", toB64(new TextEncoder().encode(name + "\n")), "set composition " + name);
+}
+
 // ---------- منطق اصلی ----------
 async function handle(update, env) {
   // انتخاب مدل از دکمه‌ها
@@ -327,13 +351,14 @@ async function handle(update, env) {
 
   if (text.startsWith("/")) {
     const cmd = text.split(/[\s@]/)[0].toLowerCase();
-    return onCommand(env, chatId, st, cmd);
+    return onCommand(env, chatId, st, cmd, text);
   }
 
   // گفتگوی عادی
   st.history.push({ role: "user", text });
   try {
-    const res = await callModel(env, st.model, CHAT_SYSTEM, st.history);
+    const comp = await getComposition(env);
+    const res = await callModel(env, st.model, CHAT_SYSTEM + `\nActive template in the repo right now: ${comp}.`, st.history);
     st.history.push({ role: "assistant", text: res.text });
     await save(env, chatId, st);
     const footer = `\n\n— ${res.label}${res.limit ? ` · امروز ${res.used}/${res.limit}` : ` · امروز ${res.used}`}`;
@@ -345,7 +370,7 @@ async function handle(update, env) {
   }
 }
 
-async function onCommand(env, chatId, st, cmd) {
+async function onCommand(env, chatId, st, cmd, text) {
   if (cmd === "/start" || cmd === "/help") {
     return send(
       env,
@@ -357,6 +382,7 @@ async function onCommand(env, chatId, st, cmd) {
         "/render ← از گفتگو، پیش‌نویس ویدیو می‌سازم",
         "/ok ← پیش‌نویس رو می‌فرستم گیت‌هاب و رندر شروع میشه",
         "/go ← همین الان رندر بگیر (بعد از آپلود فایل)",
+        "/comp ← دیدن یا عوض کردن قالب (MainComp یا CaveFire)",
         "/models ← عوض کردن مدل (سقف رایگان هر مدل کنارش نوشته)",
         "/limits ← مصرف امروز، سقف مدل‌ها و آمار رندر",
         "/new ← شروع گفتگوی جدید",
@@ -368,6 +394,16 @@ async function onCommand(env, chatId, st, cmd) {
         "• یک فایل ← توی کپشن مسیرش رو بنویس (مثلاً src/config.ts)",
       ].join("\n")
     );
+  }
+  if (cmd === "/comp") {
+    const arg = text.trim().split(/\s+/)[1];
+    const cur = await getComposition(env);
+    const list = Object.entries(COMPOSITIONS).map(([k, v]) => `• ${k}: ${v}`).join("\n");
+    if (!arg) return send(env, chatId, `قالب فعلی: ${cur}\n\n${list}\n\nبرای تغییر: /comp MainComp یا /comp CaveFire`);
+    const name = Object.keys(COMPOSITIONS).find((k) => k.toLowerCase() === arg.toLowerCase());
+    if (!name) return send(env, chatId, "قالب ناشناخته.\n\n" + list);
+    await setComposition(env, name);
+    return send(env, chatId, `✅ قالب رندر شد: ${name}\nبرای رندر /go بزن.`);
   }
   if (cmd === "/version") {
     return send(env, chatId, "نسخه‌ی در حال اجرای بات: " + VERSION);
@@ -421,14 +457,16 @@ async function onCommand(env, chatId, st, cmd) {
     if (!st.draft) return send(env, chatId, "پیش‌نویسی نیست. اول /render بزن.");
     const bytes = new TextEncoder().encode(JSON.stringify(st.draft, null, 2));
     await githubPut(env, "src/content.json", toB64(bytes), "update content from telegram");
+    await setComposition(env, "MainComp");
     st.draft = null;
     await save(env, chatId, st);
     await dispatchRender(env);
     return send(env, chatId, "🚀 رندر شروع شد. چند دقیقه دیگه ویدیو میاد.");
   }
   if (cmd === "/go") {
+    const comp = await getComposition(env);
     await dispatchRender(env);
-    return send(env, chatId, "🚀 رندر شروع شد. چند دقیقه دیگه ویدیو میاد.");
+    return send(env, chatId, `🚀 رندر شروع شد (قالب: ${comp}). چند دقیقه دیگه ویدیو میاد.`);
   }
   return send(env, chatId, "دستور ناشناخته. /help رو بزن.");
 }
