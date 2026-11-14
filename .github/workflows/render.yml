@@ -5,12 +5,23 @@ on:
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
   render:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Notify start
+        env:
+          TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          RESP=$(curl -sS -X POST "https://api.telegram.org/bot$TOKEN/sendMessage" \
+            -d chat_id="$CHAT" \
+            --data-urlencode "text=⏳ رندر شروع شد: آماده‌سازی و نصب پکیج‌ها…")
+          echo "MSG_ID=$(echo "$RESP" | jq -r '.result.message_id')" >> "$GITHUB_ENV"
 
       - name: Apply uploaded zip files
         run: |
@@ -37,24 +48,33 @@ jobs:
         run: npx remotion browser ensure
 
       - name: Render
-        run: npm run render
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          MSG_ID: ${{ env.MSG_ID }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -o pipefail
+          npm run render 2>&1 | tee render.log
 
       - name: Send to Telegram
         env:
           TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
+          CAP="$(cat out/caption.txt 2>/dev/null || echo 'رندر تموم شد ✅')"
           SIZE=$(stat -c%s out/video.mp4)
           if [ "$SIZE" -gt 49000000 ]; then
             curl -sS "https://api.telegram.org/bot$TOKEN/sendMessage" \
               -d chat_id="$CHAT" \
-              -d text="ویدیو بیشتر از ۵۰ مگ شد. از تب Actions بخش Artifacts دانلودش کن."
+              --data-urlencode "text=$CAP
+ویدیو بیشتر از ۵۰ مگ شد. از تب Actions بخش Artifacts دانلودش کن."
           else
             curl -sS -X POST "https://api.telegram.org/bot$TOKEN/sendVideo" \
               -F chat_id="$CHAT" \
               -F video=@out/video.mp4 \
               -F supports_streaming=true \
-              -F caption="رندر تموم شد ✅"
+              -F caption="$CAP"
           fi
 
       - name: Notify on failure
@@ -63,9 +83,10 @@ jobs:
           TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
+          { echo "❌ رندر خطا داد. آخرین خط‌های لاگ:"; tail -n 20 render.log 2>/dev/null; } | head -c 3500 > err.txt
           curl -sS "https://api.telegram.org/bot$TOKEN/sendMessage" \
             -d chat_id="$CHAT" \
-            -d text="❌ رندر خطا داد. لاگ رو توی تب Actions ببین."
+            --data-urlencode "text@err.txt"
 
       - uses: actions/upload-artifact@v4
         with:
