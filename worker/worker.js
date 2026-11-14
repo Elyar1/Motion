@@ -7,7 +7,7 @@ const MODELS = {
   "groq-gpt-oss": { provider: "openai", base: "https://api.groq.com/openai/v1", keyName: "GROQ_API_KEY", id: "openai/gpt-oss-120b", label: "Groq GPT-OSS 120B", limit: 1000 },
   "openrouter-free": { provider: "openai", base: "https://openrouter.ai/api/v1", keyName: "OPENROUTER_API_KEY", id: "google/gemma-4-31b-it:free", label: "OpenRouter (Gemma رایگان)", limit: 50 },
 };
-const VERSION = "2026-11-14-c (self-update)";
+const VERSION = "2026-11-14-d";
 const DEFAULT_MODEL = "g:gemini-3.5-flash-lite";
 const FALLBACK_GEMINI = ["gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-2.5-flash"];
 
@@ -15,7 +15,7 @@ const FALLBACK_GEMINI = ["gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-2.
 // اگه گوگل عوضشون کرد، فقط همین تابع رو ادیت کن.
 function geminiLimit(id) {
   if (/gemma/.test(id)) return 14400;
-  if (/pro/.test(id)) return 0; // توی پلن رایگان صفره
+  if (/pro|argon|carbon/.test(id)) return 0; // توی پلن رایگان صفره (طبق داشبورد)
   if (/flash-lite/.test(id)) return /3\.(5|1)/.test(id) ? 500 : 20;
   return 20; // flash های بزرگ و gemini-4-hydrogen
 }
@@ -94,7 +94,7 @@ function save(env, chatId, st) {
 const day = () => new Date().toLocaleDateString("en-CA", { timeZone: "America/Los_Angeles" });
 
 async function geminiModelIds(env) {
-  const cached = await env.KV.get("gemini-models", "json");
+  const cached = await env.KV.get("gemini-models-v2", "json");
   if (cached) return cached;
   try {
     const r = await fetch("https://generativelanguage.googleapis.com/v1beta/models?pageSize=200", {
@@ -105,12 +105,12 @@ async function geminiModelIds(env) {
     const all = (d.models || [])
       .filter((m) => (m.supportedGenerationMethods || []).includes("generateContent"))
       .map((m) => m.name.replace(/^models\//, ""))
-      .filter((id) => /^(gemini|gemma)-/.test(id) && !/tts|image|live|embed|audio|robotics|computer|vision|latest|customtools|thinking-exp|transcribe|omni|translate/.test(id))
+      .filter((id) => /^(gemini|gemma)-/.test(id) && !/tts|image|live|embed|audio|robotics|computer|vision|latest|customtools|thinking-exp|transcribe|omni|translate|banana|nano|lyria|veo|imagen/.test(id))
       .filter((id) => geminiLimit(id) > 0)
       .sort((x, y) => y.localeCompare(x, "en", { numeric: true }));
     const ids = [...all.filter((id) => id.startsWith("gemini-")).slice(0, 8), ...all.filter((id) => id.startsWith("gemma-")).slice(0, 2)];
     if (!ids.length) throw new Error("empty");
-    await env.KV.put("gemini-models", JSON.stringify(ids), { expirationTtl: 21600 });
+    await env.KV.put("gemini-models-v2", JSON.stringify(ids), { expirationTtl: 21600 });
     return ids;
   } catch (e) {
     return FALLBACK_GEMINI;
