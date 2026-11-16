@@ -7,7 +7,7 @@ const MODELS = {
   "groq-gpt-oss": { provider: "openai", base: "https://api.groq.com/openai/v1", keyName: "GROQ_API_KEY", id: "openai/gpt-oss-120b", label: "Groq GPT-OSS 120B", limit: 1000 },
   "openrouter-free": { provider: "openai", base: "https://openrouter.ai/api/v1", keyName: "OPENROUTER_API_KEY", id: "google/gemma-4-31b-it:free", label: "OpenRouter (Gemma رایگان)", limit: 50 },
 };
-const VERSION = "2026-11-16-h";
+const VERSION = "2026-11-16-i";
 const DEFAULT_MODEL = "g:gemini-3.5-flash-lite";
 const FALLBACK_GEMINI = ["gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-2.5-flash"];
 
@@ -344,7 +344,11 @@ async function dispatchWorkflow(env, file, inputs) {
     headers: ghHeaders(env),
     body: JSON.stringify(body),
   });
-  if (r.status !== 204) throw new Error(`Dispatch ${r.status}: ${(await r.text()).slice(0, 300)}`);
+  if (r.status !== 204) {
+    const t = await r.text();
+    if (r.status === 422 && /Unexpected inputs/i.test(t)) throw new Error("فایل workflow توی ریپو قدیمی‌تر از بات هست (ورودی‌های جدید رو نمی‌شناسه). نسخه‌ی جدید render-chalk-v3.yml رو دوباره بفرست.");
+    throw new Error(`Dispatch ${r.status}: ${t.slice(0, 300)}`);
+  }
 }
 function parseChalkArgs(tokens, lastEp) {
   const o = { episode: lastEp, start: "0", seconds: "0", audio: "mix", scale: "1080", crf: "24", shards: "6", deliver: "tg" };
@@ -435,6 +439,76 @@ async function listAssets(env, chatId, ep) {
   return send(env, chatId, `${repo}/episodes${ep ? "/" + ep : ""}\n` + (lines.join("\n") || "(خالی)"));
 }
 
+
+// ---------- تمیزکاری ریپوی public: لاگ‌ها، artifactها، ران‌های قدیمی ----------
+function b64ToText(b64) {
+  const bin = atob(String(b64).replace(/\n/g, ""));
+  return new TextDecoder().decode(Uint8Array.from(bin, (c) => c.charCodeAt(0)));
+}
+// فقط خط‌هایی که جواب تلگرام رو توی لاگ عمومی چاپ می‌کنن و artifactهای طولانی
+function quietWorkflow(text) {
+  let hidden = 0, retention = 0;
+  const src = text.split("\n");
+  // آیا خروجی این دستور (که ممکنه چند خطی با \ باشه) از قبل به /dev/null می‌ره؟
+  const alreadyQuiet = (i) => {
+    for (let j = i; j < src.length; j++) {
+      if (/\/dev\/null/.test(src[j])) return true;
+      if (!/\\\s*$/.test(src[j])) return false;
+    }
+    return false;
+  };
+  const out = src.map((line, i) => {
+    if (/^\s*curl -sS\b/.test(line) && /api\.telegram\.org/.test(line) && !alreadyQuiet(i)) {
+      hidden++;
+      return line.replace(/curl -sS\b/, "curl -sS -o /dev/null");
+    }
+    const m = line.match(/^(\s*retention-days:\s*)(\d+)\s*$/);
+    if (m && Number(m[2]) > 1) { retention++; return m[1] + "1"; }
+    return line;
+  });
+  return { text: out.join("\n"), hidden, retention };
+}
+async function quietWorkflows(env) {
+  const files = [".github/workflows/render.yml", ".github/workflows/deploy-worker.yml", ".github/workflows/render-chalk.yml"];
+  const lines = [];
+  for (const f of files) {
+    const r = await fetch(`https://api.github.com/repos/${env.GITHUB_REPO}/contents/${f}?ref=${env.GITHUB_BRANCH || "main"}`, { headers: ghHeaders(env) });
+    if (!r.ok) { lines.push(`• ${f.split("/").pop()}: پیدا نشد`); continue; }
+    const j = await r.json();
+    const q = quietWorkflow(b64ToText(j.content));
+    if (!q.hidden && !q.retention) { lines.push(`• ${f.split("/").pop()}: از قبل تمیز بود`); continue; }
+    await githubPut(env, f, toB64(new TextEncoder().encode(q.text)), "hide Telegram replies in public logs, shorter artifact retention");
+    lines.push(`• ${f.split("/").pop()}: ${q.hidden} جواب تلگرام پنهان شد` + (q.retention ? `، ${q.retention} artifact به ۱ روز رسید` : ""));
+  }
+  return lines;
+}
+async function deleteOldRuns(env, cap) {
+  let deleted = 0, skipped = 0, more = false;
+  for (let round = 0; round < 4 && deleted < cap; round++) {
+    const r = await fetch(`https://api.github.com/repos/${env.GITHUB_REPO}/actions/runs?per_page=100`, { headers: ghHeaders(env) });
+    const runs = (await r.json()).workflow_runs || [];
+    let did = 0;
+    for (const run of runs) {
+      if (run.status !== "completed") { skipped++; continue; }
+      if (deleted >= cap) { more = true; break; }
+      const d = await fetch(`https://api.github.com/repos/${env.GITHUB_REPO}/actions/runs/${run.id}`, { method: "DELETE", headers: ghHeaders(env) });
+      if (d.status === 204) { deleted++; did++; } else skipped++;
+    }
+    if (!did) break;
+  }
+  return { deleted, skipped, more };
+}
+async function cleanLogs(env, chatId) {
+  const wf = await quietWorkflows(env);
+  const d = await deleteOldRuns(env, 35);
+  return send(env, chatId, [
+    "🧹 تمیزکاری ریپوی public",
+    ...wf,
+    `ران‌های قدیمی پاک شد: ${d.deleted} (همراه لاگ‌ها و artifactهاشون)` + (d.skipped ? ` · ${d.skipped} تا رد شد (در حال اجرا)` : ""),
+    d.more || d.deleted >= 35 ? "ران‌های بیشتری مونده؛ دوباره /cleanlogs بزن." : "همه‌ی ران‌های تمام‌شده پاک شدن.",
+  ].join("\n"));
+}
+
 // ---------- منطق اصلی ----------
 async function handle(update, env) {
   // انتخاب مدل از دکمه‌ها
@@ -519,6 +593,7 @@ async function onCommand(env, chatId, st, cmd, text) {
         "/go canvas split ← تکه‌های ۴۵ مگی (با ZArchiver یا 7-Zip بازشون کن)",
         "/go remotion ← رندر Remotion مثل قبل",
         "/assets ep1v2 ← فایل‌های صوتی ذخیره‌شده‌ی اون قسمت",
+        "/cleanlogs ← پاک‌کردن لاگ‌ها و artifactهای قدیمی ریپوی public + پنهان‌کردن جواب تلگرام توی لاگ‌ها",
         "/comp ← دیدن یا عوض کردن قالب (MainComp یا CaveFire)",
         "/models ← عوض کردن مدل (سقف رایگان هر مدل کنارش نوشته)",
         "/limits ← مصرف امروز، سقف مدل‌ها و آمار رندر",
@@ -650,6 +725,7 @@ async function onCommand(env, chatId, st, cmd, text) {
     if (engine === "canvas" || engine === "chalk") return runCanvas(env, chatId, args.slice(1));
     return send(env, chatId, "موتور ناشناخته. /go remotion یا /go canvas");
   }
+  if (cmd === "/cleanlogs") return cleanLogs(env, chatId);
   if (cmd === "/assets") {
     return listAssets(env, chatId, text.trim().split(/\s+/)[1]);
   }
