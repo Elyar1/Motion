@@ -66,11 +66,11 @@ jobs:
           SIZE=$(stat -c%s out/video.mp4)
           if [ "$SIZE" -gt 49000000 ]; then
             MSG=$(printf '%s\n%s' "$CAP" "ویدیو بیشتر از ۵۰ مگ شد. از تب Actions بخش Artifacts دانلودش کن.")
-            curl -sS "https://api.telegram.org/bot$TOKEN/sendMessage" \
+            curl -sS -o /dev/null "https://api.telegram.org/bot$TOKEN/sendMessage" \
               -d chat_id="$CHAT" \
               --data-urlencode "text=$MSG"
           else
-            curl -sS -X POST "https://api.telegram.org/bot$TOKEN/sendVideo" \
+            curl -sS -o /dev/null -X POST "https://api.telegram.org/bot$TOKEN/sendVideo" \
               -F chat_id="$CHAT" \
               -F video=@out/video.mp4 \
               -F supports_streaming=true \
@@ -84,7 +84,7 @@ jobs:
           CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           { echo "❌ رندر خطا داد. آخرین خط‌های لاگ:"; tail -n 20 render.log 2>/dev/null; } | head -c 3500 > err.txt
-          curl -sS "https://api.telegram.org/bot$TOKEN/sendMessage" \
+          curl -sS -o /dev/null "https://api.telegram.org/bot$TOKEN/sendMessage" \
             -d chat_id="$CHAT" \
             --data-urlencode "text@err.txt"
 
@@ -92,4 +92,4 @@ jobs:
         with:
           name: video
           path: out/video.mp4
-          retention-days: 7
+          retention-days: 1
