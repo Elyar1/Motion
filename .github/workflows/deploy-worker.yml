@@ -36,7 +36,7 @@ jobs:
           TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          curl -sS "https://api.telegram.org/bot$TOKEN/sendMessage" \
+          curl -sS -o /dev/null "https://api.telegram.org/bot$TOKEN/sendMessage" \
             -d chat_id="$CHAT" -d text="✅ Worker آپدیت شد. /version بزن."
 
       - name: Telegram failed
@@ -45,5 +45,5 @@ jobs:
           TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          curl -sS "https://api.telegram.org/bot$TOKEN/sendMessage" \
+          curl -sS -o /dev/null "https://api.telegram.org/bot$TOKEN/sendMessage" \
             -d chat_id="$CHAT" -d text="❌ آپدیت Worker خطا داد. لاگ رو توی تب Actions ببین."
