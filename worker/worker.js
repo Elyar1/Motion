@@ -7,7 +7,7 @@ const MODELS = {
   "groq-gpt-oss": { provider: "openai", base: "https://api.groq.com/openai/v1", keyName: "GROQ_API_KEY", id: "openai/gpt-oss-120b", label: "Groq GPT-OSS 120B", limit: 1000 },
   "openrouter-free": { provider: "openai", base: "https://openrouter.ai/api/v1", keyName: "OPENROUTER_API_KEY", id: "google/gemma-4-31b-it:free", label: "OpenRouter (Gemma رایگان)", limit: 50 },
 };
-const VERSION = "2026-11-15-f";
+const VERSION = "2026-11-16-h";
 const DEFAULT_MODEL = "g:gemini-3.5-flash-lite";
 const FALLBACK_GEMINI = ["gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-2.5-flash"];
 
@@ -213,10 +213,10 @@ async function renderStats(env) {
     const now = new Date();
     const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString().slice(0, 10);
     const r = await fetch(
-      `https://api.github.com/repos/${env.GITHUB_REPO}/actions/workflows/render.yml/runs?per_page=100&created=%3E%3D${monthStart}`,
+      `https://api.github.com/repos/${env.GITHUB_REPO}/actions/runs?per_page=100&created=%3E%3D${monthStart}`,
       { headers: ghHeaders(env) }
     );
-    const runs = (await r.json()).workflow_runs || [];
+    const runs = ((await r.json()).workflow_runs || []).filter((x) => /render(-chalk)?\.yml/.test(x.path || ""));
     const today = now.toISOString().slice(0, 10);
     const todayCount = runs.filter((x) => x.created_at.startsWith(today)).length;
     const minutes = runs.reduce((s, x) => {
@@ -278,8 +278,8 @@ function toB64(bytes) {
   }
   return btoa(bin);
 }
-async function githubPut(env, path, b64, message) {
-  const url = `https://api.github.com/repos/${env.GITHUB_REPO}/contents/${path}`;
+async function githubPut(env, path, b64, message, repo) {
+  const url = `https://api.github.com/repos/${repo || env.GITHUB_REPO}/contents/${path}`;
   const branch = env.GITHUB_BRANCH || "main";
   let sha;
   const g = await fetch(`${url}?ref=${branch}`, { headers: ghHeaders(env) });
@@ -292,12 +292,9 @@ async function githubPut(env, path, b64, message) {
   if (!r.ok) throw new Error(`GitHub ${r.status}: ${(await r.text()).slice(0, 300)}`);
 }
 async function latestRun(env) {
-  const r = await fetch(
-    `https://api.github.com/repos/${env.GITHUB_REPO}/actions/workflows/render.yml/runs?per_page=1`,
-    { headers: ghHeaders(env) }
-  );
+  const r = await fetch(`https://api.github.com/repos/${env.GITHUB_REPO}/actions/runs?per_page=10`, { headers: ghHeaders(env) });
   const d = await r.json();
-  return (d.workflow_runs || [])[0] || null;
+  return (d.workflow_runs || []).find((x) => /render(-chalk)?\.yml/.test(x.path || "")) || null;
 }
 async function dispatchRender(env) {
   const r = await fetch(
@@ -328,6 +325,116 @@ function setComposition(env, name) {
   return githubPut(env, "composition.txt", toB64(new TextEncoder().encode(name + "\n")), "set composition " + name);
 }
 
+
+// ---------- رندر مرد گچی + فایل‌های صوتی (ریپوی private) ----------
+const AUDIO_EXT = /\.(mp3|m4a|aac|wav|ogg|oga|opus|flac|amr|wma)$/i;
+const EP_RE = /^[A-Za-z0-9_-]{1,32}$/;
+const safeName = (s) => String(s || "").replace(/[^A-Za-z0-9._-]/g, "_").replace(/^\.+/, "").slice(0, 80);
+function assetsRepo(env) {
+  return env.ASSETS_REPO || String(env.GITHUB_REPO).split("/")[0] + "/motion-assets";
+}
+async function lastEpisode(env) {
+  return (await env.KV.get("last_ep")) || "ep1v2";
+}
+async function dispatchWorkflow(env, file, inputs) {
+  const body = { ref: env.GITHUB_BRANCH || "main" };
+  if (inputs) body.inputs = inputs;
+  const r = await fetch(`https://api.github.com/repos/${env.GITHUB_REPO}/actions/workflows/${file}/dispatches`, {
+    method: "POST",
+    headers: ghHeaders(env),
+    body: JSON.stringify(body),
+  });
+  if (r.status !== 204) throw new Error(`Dispatch ${r.status}: ${(await r.text()).slice(0, 300)}`);
+}
+function parseChalkArgs(tokens, lastEp) {
+  const o = { episode: lastEp, start: "0", seconds: "0", audio: "mix", scale: "1080", crf: "24", shards: "6", deliver: "tg" };
+  const nums = [];
+  for (const t of tokens) {
+    const low = t.toLowerCase();
+    if (low === "preview") { o.audio = "none"; o.scale = "720"; continue; }
+    if (low === "master" || low === "release") { o.deliver = "release"; continue; }
+    if (low === "split") { o.deliver = "split"; continue; }
+    if (/^\d+(\.\d+)?$/.test(t)) { nums.push(t); continue; }
+    const m = low.match(/^([a-z]+)=(.+)$/);
+    if (m) {
+      const k = m[1], v = m[2];
+      if (k === "start" || k === "from") o.start = v;
+      else if (k === "sec" || k === "seconds" || k === "len") o.seconds = v;
+      else if (k === "crf") o.crf = v;
+      else if (k === "scale") o.scale = v;
+      else if (k === "audio") o.audio = v;
+      else if (k === "shards") o.shards = v;
+      else if (k === "deliver") o.deliver = v;
+      else return { error: "گزینه‌ی ناشناخته: " + t };
+      continue;
+    }
+    if (EP_RE.test(t)) { o.episode = t; continue; }
+    return { error: "نفهمیدم: " + t };
+  }
+  if (nums[0] !== undefined) o.start = nums[0];
+  if (nums[1] !== undefined) o.seconds = nums[1];
+  if (nums.length > 2) return { error: "فقط دو عدد (شروع و مدت) قبول می‌کنم." };
+  const n = (v) => Number(v);
+  if (!(n(o.start) >= 0) || !(n(o.seconds) >= 0)) return { error: "شروع و مدت باید عدد باشن." };
+  if (!(Number.isInteger(n(o.crf)) && n(o.crf) >= 14 && n(o.crf) <= 35)) return { error: "crf باید عدد بین ۱۴ تا ۳۵ باشه." };
+  if (!["1080", "720"].includes(o.scale)) return { error: "scale فقط 1080 یا 720." };
+  if (!["mix", "none"].includes(o.audio)) return { error: "audio فقط mix یا none." };
+  if (!(Number.isInteger(n(o.shards)) && n(o.shards) >= 1 && n(o.shards) <= 12)) return { error: "shards بین ۱ تا ۱۲." };
+  if (!["tg", "release", "split"].includes(o.deliver)) return { error: "deliver فقط tg یا release یا split." };
+  return { inputs: o };
+}
+async function runCanvas(env, chatId, tokens) {
+  const p = parseChalkArgs(tokens, await lastEpisode(env));
+  if (p.error) return send(env, chatId, "⚠️ " + p.error + "\n\nمثال: /go canvas ep1v2\n/go canvas preview 8.6 17.4\n/go canvas ep1v2 master");
+  const o = p.inputs;
+  await dispatchWorkflow(env, "render-chalk.yml", o);
+  await env.KV.put("last_ep", o.episode);
+  const range = Number(o.seconds) > 0 ? `از ثانیه ${o.start} به مدت ${o.seconds} ثانیه` : Number(o.start) > 0 ? `از ثانیه ${o.start} تا آخر` : "کل ویدیو";
+  const dl = o.deliver === "release" ? "پیش‌نمایش توی تلگرام + مستر توی گیت‌هاب (private)" : o.deliver === "split" ? "چندتکه‌ی ۴۵ مگی توی تلگرام" : "مستقیم توی تلگرام";
+  return send(env, chatId, [
+    "🚀 رندر مرد گچی شروع شد",
+    `قسمت: ${o.episode}`,
+    `بازه: ${range}`,
+    `کیفیت: ${o.scale}p · crf ${o.crf} · صدا: ${o.audio === "mix" ? "دارد" : "ندارد (پیش‌نمایش بی‌زیرنویس)"}`,
+    `تحویل: ${dl}`,
+    "/status برای وضعیت · /cancel برای لغو",
+  ].join("\n"));
+}
+async function onAudio(env, chatId, msg, f, kind) {
+  const cap = (msg.caption || "").trim().replace(/^audio\s+/i, "");
+  let ep = null, name = null;
+  if (cap) {
+    const parts = cap.split(/[\s/]+/).filter(Boolean);
+    if (parts[0] && EP_RE.test(parts[0])) { ep = parts[0]; name = parts.slice(1).join("_") || null; }
+  }
+  if (!ep) ep = await lastEpisode(env);
+  const repo = assetsRepo(env);
+  if (f.file_size && f.file_size > 18 * 1024 * 1024) {
+    return send(env, chatId, `این فایل بیشتر از ۱۸ مگه و بات نمی‌تونه از تلگرام بگیره.\nخودت توی گیتهاب آپلودش کن:\nhttps://github.com/${repo}/upload/${env.GITHUB_BRANCH || "main"}/episodes/${ep}`);
+  }
+  const ext = ((f.file_name || "").match(/\.[A-Za-z0-9]+$/) || [kind === "voice" ? ".ogg" : f.mime_type === "audio/mpeg" ? ".mp3" : ".m4a"])[0];
+  let fname = safeName(name || f.file_name || (kind === "voice" ? "voice_" : "audio_") + Date.now());
+  if (!AUDIO_EXT.test(fname)) fname += ext;
+  const path = `episodes/${ep}/${fname}`;
+  const info = await tg(env, "getFile", { file_id: f.file_id });
+  if (!info.ok) throw new Error("تلگرام فایل رو نداد: " + JSON.stringify(info).slice(0, 200));
+  const fr = await fetch(`https://api.telegram.org/file/bot${env.TELEGRAM_BOT_TOKEN}/${info.result.file_path}`);
+  if (!fr.ok) throw new Error("دانلود فایل از تلگرام ناموفق: " + fr.status);
+  const bytes = new Uint8Array(await fr.arrayBuffer());
+  await githubPut(env, path, toB64(bytes), "audio from telegram: " + path, repo);
+  await env.KV.put("last_ep", ep);
+  return send(env, chatId, `✅ صدا ذخیره شد (ریپوی private، نه public)\n📁 ${repo}/${path}\n${Math.max(1, Math.round(bytes.length / 1024))} KB\nبرای دیدن فایل‌های این قسمت: /assets ${ep}`);
+}
+async function listAssets(env, chatId, ep) {
+  const repo = assetsRepo(env);
+  const r = await fetch(`https://api.github.com/repos/${repo}/contents/episodes${ep ? "/" + ep : ""}?ref=${env.GITHUB_BRANCH || "main"}`, { headers: ghHeaders(env) });
+  if (r.status === 404) return send(env, chatId, ep ? `پوشه‌ی ${ep} وجود نداره یا خالیه.` : "هنوز قسمتی توی ریپوی private نیست.");
+  if (!r.ok) throw new Error(`GitHub ${r.status}: ${(await r.text()).slice(0, 200)}`);
+  const items = await r.json();
+  const lines = items.map((i) => (i.type === "dir" ? `📁 ${i.name}` : `🎵 ${i.name} · ${Math.max(1, Math.round(i.size / 1024))} KB`));
+  return send(env, chatId, `${repo}/episodes${ep ? "/" + ep : ""}\n` + (lines.join("\n") || "(خالی)"));
+}
+
 // ---------- منطق اصلی ----------
 async function handle(update, env) {
   // انتخاب مدل از دکمه‌ها
@@ -335,6 +442,15 @@ async function handle(update, env) {
   if (cb) {
     const chatId = cb.message.chat.id;
     if (String(chatId) !== String(env.ALLOWED_CHAT_ID)) return;
+    if (cb.data === "go:canvas" || cb.data === "go:remotion") {
+      await tg(env, "answerCallbackQuery", { callback_query_id: cb.id });
+      if (cb.data === "go:remotion") {
+        const comp = await getComposition(env);
+        await dispatchRender(env);
+        return send(env, chatId, `🚀 رندر Remotion شروع شد (قالب: ${comp}).`);
+      }
+      return runCanvas(env, chatId, []);
+    }
     if (cb.data && (cb.data.startsWith("g:") || MODELS[cb.data])) {
       const st = await load(env, chatId);
       st.model = cb.data;
@@ -352,7 +468,13 @@ async function handle(update, env) {
 
   const st = await load(env, chatId);
 
-  if (msg.document) return onDocument(env, chatId, msg);
+  if (msg.audio) return onAudio(env, chatId, msg, msg.audio, "audio");
+  if (msg.voice) return onAudio(env, chatId, msg, msg.voice, "voice");
+  if (msg.document) {
+    const d = msg.document;
+    if ((d.mime_type || "").startsWith("audio/") || AUDIO_EXT.test(d.file_name || "")) return onAudio(env, chatId, msg, d, "document");
+    return onDocument(env, chatId, msg);
+  }
 
   const text = (msg.text || "").trim();
   if (!text) return;
@@ -389,7 +511,14 @@ async function onCommand(env, chatId, st, cmd, text) {
         "• معمولی چت کن تا درباره موضوع و متن‌ها حرف بزنیم.",
         "/render ← از گفتگو، پیش‌نویس ویدیو می‌سازم",
         "/ok ← پیش‌نویس رو می‌فرستم گیت‌هاب و رندر شروع میشه",
-        "/go ← همین الان رندر بگیر (بعد از آپلود فایل)",
+        "/go ← انتخاب موتور با دکمه",
+        "/go canvas ← رندر کامل مرد گچی (آخرین قسمت)",
+        "/go canvas ep2 ← قسمت مشخص",
+        "/go canvas preview 8.6 17.4 ← پیش‌نمایش بی‌صدا ۷۲۰ از ثانیه ۸.۶ به مدت ۱۷.۴",
+        "/go canvas master ← مستر باکیفیت توی گیت‌هاب private + پیش‌نمایش توی تلگرام",
+        "/go canvas split ← تکه‌های ۴۵ مگی (با ZArchiver یا 7-Zip بازشون کن)",
+        "/go remotion ← رندر Remotion مثل قبل",
+        "/assets ep1v2 ← فایل‌های صوتی ذخیره‌شده‌ی اون قسمت",
         "/comp ← دیدن یا عوض کردن قالب (MainComp یا CaveFire)",
         "/models ← عوض کردن مدل (سقف رایگان هر مدل کنارش نوشته)",
         "/limits ← مصرف امروز، سقف مدل‌ها و آمار رندر",
@@ -401,6 +530,7 @@ async function onCommand(env, chatId, st, cmd, text) {
         "فایل بفرستی:",
         "• ZIP ← باز میشه و روی پروژه اعمال میشه",
         "• یک فایل ← توی کپشن مسیرش رو بنویس (مثلاً src/config.ts)",
+        "• صدا (mp3/m4a/wav/...) ← کپشن: ep1v2 یا ep1v2/main.wav → می‌ره توی ریپوی private، هیچ‌وقت public نمی‌شه (تا ۱۸ مگ)",
       ].join("\n")
     );
   }
@@ -426,7 +556,16 @@ async function onCommand(env, chatId, st, cmd, text) {
       : run.conclusion === "success" ? "تموم شد ✅"
       : run.conclusion === "cancelled" ? "لغو شد ⛔"
       : "خطا ❌";
-    return send(env, chatId, `آخرین رندر: ${state}\n⏱ ${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, "0")}\n${run.html_url}\n(درصد پیشرفت توی همون پیام زنده‌ی رندر دیده میشه)`);
+    const chalk = /render-chalk/.test(run.path || "");
+    let extra = "";
+    if (chalk && run.status !== "completed") {
+      try {
+        const jr = await fetch(`${run.url}/jobs?per_page=50`, { headers: ghHeaders(env) });
+        const sh = ((await jr.json()).jobs || []).filter((j) => /^shard/.test(j.name));
+        if (sh.length) extra = `\nشاردها: ${sh.filter((j) => j.status === "completed").length}/${sh.length}`;
+      } catch (e) {}
+    }
+    return send(env, chatId, `آخرین رندر (${chalk ? "مرد گچی" : "Remotion"}): ${state}\n⏱ ${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, "0")}${extra}\n${run.html_url}`);
   }
   if (cmd === "/cancel") {
     const run = await latestRun(env);
@@ -496,9 +635,23 @@ async function onCommand(env, chatId, st, cmd, text) {
     return send(env, chatId, "🚀 رندر شروع شد. چند دقیقه دیگه ویدیو میاد.");
   }
   if (cmd === "/go") {
-    const comp = await getComposition(env);
-    await dispatchRender(env);
-    return send(env, chatId, `🚀 رندر شروع شد (قالب: ${comp}). چند دقیقه دیگه ویدیو میاد.`);
+    const args = text.trim().split(/\s+/).slice(1);
+    const engine = (args[0] || "").toLowerCase();
+    if (!engine) {
+      return send(env, chatId, "با کدوم موتور رندر بگیرم؟", {
+        reply_markup: { inline_keyboard: [[{ text: "🧱 مرد گچی (Canvas)", callback_data: "go:canvas" }, { text: "🧩 Remotion", callback_data: "go:remotion" }]] },
+      });
+    }
+    if (engine === "remotion") {
+      const comp = await getComposition(env);
+      await dispatchRender(env);
+      return send(env, chatId, `🚀 رندر Remotion شروع شد (قالب: ${comp}). چند دقیقه دیگه ویدیو میاد.`);
+    }
+    if (engine === "canvas" || engine === "chalk") return runCanvas(env, chatId, args.slice(1));
+    return send(env, chatId, "موتور ناشناخته. /go remotion یا /go canvas");
+  }
+  if (cmd === "/assets") {
+    return listAssets(env, chatId, text.trim().split(/\s+/)[1]);
   }
   return send(env, chatId, "دستور ناشناخته. /help رو بزن.");
 }
