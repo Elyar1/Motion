@@ -1,20 +1,39 @@
+# render-chalk.yml  VERSION v3 (inputs: episode start seconds audio scale crf shards deliver)
 name: Render Chalk
 
 on:
   workflow_dispatch:
     inputs:
       episode:
-        description: "Episode folder in the private assets repo (e.g. ep1)"
-        default: "ep1"
+        description: "Episode folder in the private assets repo (e.g. ep1v2)"
+        default: "ep1v2"
+      start:
+        description: "Start second (0 = from the beginning)"
+        default: "0"
+      seconds:
+        description: "How many seconds to render (0 = until the end)"
+        default: "0"
+      audio:
+        description: "mix = add the episode audio, none = silent preview with no subtitles"
+        default: "mix"
+        type: choice
+        options: ["mix", "none"]
+      scale:
+        description: "Output width: 1080 (final) or 720 (fast preview)"
+        default: "1080"
+        type: choice
+        options: ["1080", "720"]
+      crf:
+        description: "x264 quality (lower = better and bigger, 24 = current)"
+        default: "24"
       shards:
         description: "Parallel jobs"
         default: "6"
-      crf:
-        description: "x264 quality (lower = better, 24 = current)"
-        default: "24"
-      seconds:
-        description: "Test only: render just the first N seconds (0 = full video)"
-        default: "0"
+      deliver:
+        description: "tg = Telegram (max 49 MB) | release = master in private GitHub release + preview in Telegram | split = 45 MB parts in Telegram"
+        default: "tg"
+        type: choice
+        options: ["tg", "release", "split"]
 
 permissions:
   contents: read
@@ -29,22 +48,7 @@ jobs:
       - id: p
         working-directory: chalk/src
         run: |
-          python3 plan.py "${{ inputs.shards }}" > /tmp/m.json
-          if [ "${{ inputs.seconds }}" != "0" ]; then
-            python3 - <<'PY'
-          import json
-          m = json.load(open('/tmp/m.json'))
-          lim = int(float("${{ inputs.seconds }}") * 30)
-          inc = []
-          step = -(-lim // len(m['include']))
-          for k in range(len(m['include'])):
-              s, e = k * step, min(lim, (k + 1) * step)
-              if s < e:
-                  inc.append({"i": k, "s": s, "e": e})
-          json.dump({"include": inc}, open('/tmp/m.json', 'w'))
-          PY
-          fi
-          echo "matrix=$(cat /tmp/m.json)" >> "$GITHUB_OUTPUT"
+          echo "matrix=$(python3 plan.py '${{ inputs.shards }}' '${{ inputs.start }}' '${{ inputs.seconds }}')" >> "$GITHUB_OUTPUT"
 
   shard:
     needs: plan
@@ -71,7 +75,11 @@ jobs:
         run: python3 build_html.py
       - name: Render shard
         working-directory: chalk/src
-        run: python3 render_shard.py ${{ matrix.s }} ${{ matrix.e }} /tmp/chunk.mp4 "${{ inputs.crf }}"
+        env:
+          SCALE: ${{ inputs.scale }}
+          NOSUBS: ${{ inputs.audio == 'none' && '1' || '0' }}
+          MAXRATE: ${{ inputs.deliver == 'release' && '40M' || '9M' }}
+        run: python3 render_shard.py ${{ matrix.s }} ${{ matrix.e }} /tmp/chunk.mp4 "${{ inputs.deliver == 'release' && '16' || inputs.crf }}"
       - name: Encrypt chunk (repo is public; artifacts are not private)
         env:
           K: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -86,14 +94,15 @@ jobs:
     needs: shard
     runs-on: ubuntu-latest
     steps:
-      - name: Install ffmpeg
+      - name: Install tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq ffmpeg
+          sudo apt-get install -y -qq ffmpeg p7zip-full
       - uses: actions/download-artifact@v4
         with:
           path: /tmp/chunks
       - name: Get private assets (audio)
+        if: ${{ inputs.audio == 'mix' }}
         uses: actions/checkout@v4
         with:
           repository: ${{ github.repository_owner }}/motion-assets
@@ -112,25 +121,83 @@ jobs:
             echo "file '$n.mp4'" >> list.txt
           done
           ffmpeg -y -loglevel error -f concat -safe 0 -i list.txt -c copy joined.mp4
-          EP="$GITHUB_WORKSPACE/assets/episodes/${{ inputs.episode }}"
-          if [ -f "$EP/mix.m4a" ]; then
-            ffmpeg -y -loglevel error -i joined.mp4 -i "$EP/mix.m4a" -map 0:v -map 1:a -c copy -shortest -movflags +faststart /tmp/video.mp4
+          if [ "${{ inputs.audio }}" = "none" ]; then
+            cp joined.mp4 /tmp/master.mp4
           else
-            ffmpeg -y -loglevel error -i joined.mp4 -i "$EP/mix.wav" -map 0:v -map 1:a -c:v copy -c:a aac -b:a 192k -shortest -movflags +faststart /tmp/video.mp4
+            EP="$GITHUB_WORKSPACE/assets/episodes/${{ inputs.episode }}"
+            if [ -f "$EP/mix.m4a" ]; then
+              ffmpeg -y -loglevel error -i joined.mp4 -i "$EP/mix.m4a" -map 0:v -map 1:a -c copy -shortest -movflags +faststart /tmp/master.mp4
+            else
+              ffmpeg -y -loglevel error -i joined.mp4 -i "$EP/mix.wav" -map 0:v -map 1:a -c:v copy -c:a aac -b:a 192k -shortest -movflags +faststart /tmp/master.mp4
+            fi
           fi
-          ls -la /tmp/video.mp4
-      - name: Send to Telegram
+          ls -la /tmp/master.mp4
+      - name: Deliver
+        env:
+          TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GH_TOKEN: ${{ secrets.ASSETS_WRITE_TOKEN }}
+          DELIVER: ${{ inputs.deliver }}
+          EP: ${{ inputs.episode }}
+          CRF: ${{ inputs.crf }}
+          SCALE: ${{ inputs.scale }}
+          OWNER: ${{ github.repository_owner }}
+          RUN_N: ${{ github.run_number }}
+        run: |
+          set -e
+          LIMIT=49000000
+          DUR=$(ffprobe -v error -show_entries format=duration -of csv=p=0 /tmp/master.mp4 | cut -d. -f1)
+          MB=$(( $(stat -c%s /tmp/master.mp4) / 1048576 ))
+          tg_msg() { curl -sS "https://api.telegram.org/bot$TOKEN/sendMessage" -d chat_id="$CHAT" --data-urlencode "text=$1" > /dev/null; }
+          tg_video() { curl -sS -X POST "https://api.telegram.org/bot$TOKEN/sendVideo" -F chat_id="$CHAT" -F video=@"$1" -F supports_streaming=true -F caption="$2" > /dev/null; }
+          case "$DELIVER" in
+            tg)
+              if [ "$(stat -c%s /tmp/master.mp4)" -gt "$LIMIT" ]; then
+                tg_msg "رندر تموم شد ولی ${MB} مگابایته و تلگرام بالای ۵۰ نمیذاره. دوباره با master یا split بزن."
+              else
+                tg_video /tmp/master.mp4 "رندر مرد گچی ✅ (${DUR} ثانیه · ${SCALE}p · crf ${CRF} · ${MB} MB)"
+              fi
+              ;;
+            release)
+              C="$CRF"
+              for i in 1 2 3; do
+                ffmpeg -y -loglevel error -i /tmp/master.mp4 -c:v libx264 -preset veryfast -crf "$C" -maxrate 9M -bufsize 18M -pix_fmt yuv420p -colorspace bt709 -color_primaries bt709 -color_trc bt709 -c:a copy -movflags +faststart /tmp/preview.mp4
+                [ "$(stat -c%s /tmp/preview.mp4)" -le "$LIMIT" ] && break
+                C=$((C+3))
+              done
+              TAG="${EP}-r${RUN_N}"
+              NOTE="مستر آپلود نشد (سکرت ASSETS_WRITE_TOKEN تنظیم نشده)."
+              if [ -n "$GH_TOKEN" ]; then
+                cp /tmp/master.mp4 "/tmp/${EP}_master.mp4"
+                if gh release create "$TAG" "/tmp/${EP}_master.mp4" --repo "$OWNER/motion-assets" --title "$EP master (run $RUN_N)" --notes "Master render, ${SCALE}p"; then
+                  NOTE="مستر ${MB} مگی: https://github.com/$OWNER/motion-assets/releases/tag/$TAG"
+                else
+                  NOTE="آپلود مستر روی گیت‌هاب ناموفق بود (دسترسی توکن رو چک کن)."
+                fi
+              fi
+              NL=$'\n'
+              tg_video /tmp/preview.mp4 "پیش‌نمایش ✅ (${DUR} ثانیه · crf ${C})${NL}${NOTE}"
+              ;;
+            split)
+              mkdir -p /tmp/parts && cd /tmp/parts
+              7z a -v45m -mx0 "${EP}.7z" /tmp/master.mp4 > /dev/null
+              N=$(ls "${EP}".7z.* | wc -l)
+              tg_msg "ویدیو (${MB} مگ) به ${N} تکه‌ی ۴۵ مگی تقسیم شد. همه رو توی یه پوشه بریز و با ZArchiver یا 7-Zip فایل .001 رو باز کن تا ویدیوی کامل بیرون بیاد."
+              for f in $(ls "${EP}".7z.* | sort); do
+                curl -sS -X POST "https://api.telegram.org/bot$TOKEN/sendDocument" -F chat_id="$CHAT" -F document=@"$f" -F caption="$f" > /dev/null
+              done
+              ;;
+          esac
+
+  notify-failure:
+    needs: [plan, shard, finish]
+    if: ${{ always() && (needs.plan.result == 'failure' || needs.shard.result == 'failure' || needs.finish.result == 'failure') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Tell me on Telegram
         env:
           TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          SIZE=$(stat -c%s /tmp/video.mp4)
-          DUR=$(ffprobe -v error -show_entries format=duration -of csv=p=0 /tmp/video.mp4 | cut -d. -f1)
-          if [ "$SIZE" -gt 49000000 ]; then
-            curl -sS "https://api.telegram.org/bot$TOKEN/sendMessage" -d chat_id="$CHAT" \
-              --data-urlencode "text=رندر تموم شد ولی حجمش بیشتر از ۵۰ مگ شد. crf رو بالاتر بذار."
-          else
-            curl -sS -X POST "https://api.telegram.org/bot$TOKEN/sendVideo" \
-              -F chat_id="$CHAT" -F video=@/tmp/video.mp4 -F supports_streaming=true \
-              -F caption="رندر مرد گچی ✅ (${DUR} ثانیه)"
-          fi
+          curl -sS "https://api.telegram.org/bot$TOKEN/sendMessage" -d chat_id="$CHAT" \
+            --data-urlencode "text=❌ رندر مرد گچی خطا خورد. لاگ: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" > /dev/null
