@@ -1,24 +1,29 @@
 # Render frames [START, END) of the episode and encode them straight into a chunk mp4 (no frame files on disk).
 # usage: python3 render_shard.py START END OUT.mp4 [crf]
-import sys, os, json, subprocess
+import sys, os, json, subprocess, shutil
 from playwright.sync_api import sync_playwright
 
 FPS = 30
 here = os.path.dirname(os.path.abspath(__file__))
 start, end, out = int(sys.argv[1]), int(sys.argv[2]), sys.argv[3]
 crf = sys.argv[4] if len(sys.argv) > 4 else "24"
+scale = int(os.environ.get("SCALE", "1080"))
+qs = "?render=1" + ("&sb=1" if os.environ.get("NOSUBS") == "1" else "")
+vf = "scale=out_color_matrix=bt709:out_range=tv" + ("" if scale == 1080 else f",scale={scale}:-2:flags=lanczos")
 
+if not shutil.which('ffmpeg'):
+    sys.exit('ERROR: ffmpeg is not installed on this machine')
 ff = subprocess.Popen(
     ["ffmpeg", "-y", "-loglevel", "error", "-f", "image2pipe", "-c:v", "mjpeg",
      "-framerate", str(FPS), "-i", "-",
-     "-c:v", "libx264", "-preset", "veryfast", "-crf", crf, "-maxrate", "9M", "-bufsize", "18M",
-     "-pix_fmt", "yuv420p", "-an", out],
+     "-vf", vf, "-c:v", "libx264", "-preset", "veryfast", "-crf", crf, "-maxrate", "9M", "-bufsize", "18M",
+     "-pix_fmt", "yuv420p", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709", "-color_range", "tv", "-an", out],
     stdin=subprocess.PIPE)
 
 with sync_playwright() as p:
     b = p.chromium.launch(args=["--disable-gpu"])
     pg = b.new_page(viewport={"width": 1080, "height": 1920})
-    pg.goto("file://" + here + "/ep.html?render=1")
+    pg.goto("file://" + here + "/ep.html" + qs)
     pg.wait_for_function("window.READY===true")
     for i in range(start, end):
         pg.evaluate("t=>window.seek(t)", i / FPS)
