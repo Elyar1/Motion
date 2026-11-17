@@ -1,4 +1,4 @@
-# render-chalk.yml  VERSION v3 (inputs: episode start seconds audio scale crf shards deliver)
+# render-chalk.yml  VERSION v4 (engine and audio live in the PRIVATE repo motion-assets)
 name: Render Chalk
 
 on:
@@ -44,9 +44,15 @@ jobs:
     outputs:
       matrix: ${{ steps.p.outputs.matrix }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Get private engine and assets
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/motion-assets
+          token: ${{ secrets.ASSETS_TOKEN }}
+          path: priv
+          persist-credentials: false
       - id: p
-        working-directory: chalk/src
+        working-directory: priv/engine/chalk/src
         run: |
           echo "matrix=$(python3 plan.py '${{ inputs.shards }}' '${{ inputs.start }}' '${{ inputs.seconds }}')" >> "$GITHUB_OUTPUT"
 
@@ -57,7 +63,13 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Get private engine and assets
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/motion-assets
+          token: ${{ secrets.ASSETS_TOKEN }}
+          path: priv
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -71,10 +83,10 @@ jobs:
           pip install playwright
           python -m playwright install --with-deps chromium
       - name: Build page
-        working-directory: chalk/src
+        working-directory: priv/engine/chalk/src
         run: python3 build_html.py
       - name: Render shard
-        working-directory: chalk/src
+        working-directory: priv/engine/chalk/src
         env:
           SCALE: ${{ inputs.scale }}
           NOSUBS: ${{ inputs.audio == 'none' && '1' || '0' }}
@@ -101,13 +113,13 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: /tmp/chunks
-      - name: Get private assets (audio)
-        if: ${{ inputs.audio == 'mix' }}
+      - name: Get private engine and assets
         uses: actions/checkout@v4
         with:
           repository: ${{ github.repository_owner }}/motion-assets
           token: ${{ secrets.ASSETS_TOKEN }}
-          path: assets
+          path: priv
+          persist-credentials: false
       - name: Decrypt, join, add audio
         env:
           K: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -124,7 +136,7 @@ jobs:
           if [ "${{ inputs.audio }}" = "none" ]; then
             cp joined.mp4 /tmp/master.mp4
           else
-            EP="$GITHUB_WORKSPACE/assets/episodes/${{ inputs.episode }}"
+            EP="$GITHUB_WORKSPACE/priv/episodes/${{ inputs.episode }}"
             if [ -f "$EP/mix.m4a" ]; then
               ffmpeg -y -loglevel error -i joined.mp4 -i "$EP/mix.m4a" -map 0:v -map 1:a -c copy -shortest -movflags +faststart /tmp/master.mp4
             else
