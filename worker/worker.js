@@ -7,7 +7,7 @@ const MODELS = {
   "groq-gpt-oss": { provider: "openai", base: "https://api.groq.com/openai/v1", keyName: "GROQ_API_KEY", id: "openai/gpt-oss-120b", label: "Groq GPT-OSS 120B", limit: 1000 },
   "openrouter-free": { provider: "openai", base: "https://openrouter.ai/api/v1", keyName: "OPENROUTER_API_KEY", id: "google/gemma-4-31b-it:free", label: "OpenRouter (Gemma رایگان)", limit: 50 },
 };
-const VERSION = "2026-11-16-i";
+const VERSION = "2026-11-16-j";
 const DEFAULT_MODEL = "g:gemini-3.5-flash-lite";
 const FALLBACK_GEMINI = ["gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-2.5-flash"];
 
@@ -440,6 +440,51 @@ async function listAssets(env, chatId, ep) {
 }
 
 
+
+// ---------- مهاجرت: فقط این مسیرها public می‌مونن، بقیه‌ی فایل‌ها می‌رن ریپوی private ----------
+const PUBLIC_PREFIXES = ["worker/", ".github/", "src/", "public/", "scripts/", "tools/"];
+const PUBLIC_FILES = ["composition.txt", "package.json", "remotion.config.ts", "tsconfig.json"];
+function isPublicPath(p) {
+  return PUBLIC_FILES.includes(p) || PUBLIC_PREFIXES.some((x) => p.startsWith(x));
+}
+async function onPrivateZip(env, chatId, doc, name) {
+  const info = await tg(env, "getFile", { file_id: doc.file_id });
+  if (!info.ok) throw new Error("تلگرام فایل رو نداد: " + JSON.stringify(info).slice(0, 200));
+  const fr = await fetch(`https://api.telegram.org/file/bot${env.TELEGRAM_BOT_TOKEN}/${info.result.file_path}`);
+  if (!fr.ok) throw new Error("دانلود فایل از تلگرام ناموفق: " + fr.status);
+  const bytes = new Uint8Array(await fr.arrayBuffer());
+  const zname = `${Date.now()}_${safeName(name).replace(/\.zip$/i, "")}.zip`;
+  await githubPut(env, `inbox/${zname}`, toB64(bytes), "zip from telegram (private)", assetsRepo(env));
+  await dispatchWorkflow(env, "unpack-private.yml", { name: zname });
+  return send(env, chatId, "📦 zip توی ریپوی private گذاشته شد و داره باز می‌شه (حدود یک دقیقه). وقتی تموم شد خبر می‌دم.");
+}
+async function rmPublic(env, chatId, path) {
+  path = String(path || "").replace(/^\/+|\/+$/g, "");
+  if (!path || path.includes("..") || !/^(chalk|uploads)(\/|$)/.test(path)) {
+    return send(env, chatId, "فقط پوشه‌ی chalk/ و uploads/ رو می‌تونم از ریپوی public پاک کنم. مثال: /rmpublic chalk");
+  }
+  const branch = env.GITHUB_BRANCH || "main";
+  const files = [];
+  const walk = async (p) => {
+    const r = await fetch(`https://api.github.com/repos/${env.GITHUB_REPO}/contents/${p}?ref=${branch}`, { headers: ghHeaders(env) });
+    if (r.status === 404) return;
+    if (!r.ok) throw new Error(`GitHub ${r.status}: ${(await r.text()).slice(0, 200)}`);
+    const j = await r.json();
+    if (Array.isArray(j)) { for (const it of j) { if (it.type === "dir") await walk(it.path); else files.push(it); } }
+    else files.push(j);
+  };
+  await walk(path);
+  if (!files.length) return send(env, chatId, `چیزی توی ${path} پیدا نشد (شاید قبلاً پاک شده).`);
+  if (files.length > 30) return send(env, chatId, `${files.length} فایل هست؛ بیشتر از ۳۰ تا رو یک‌جا پاک نمی‌کنم. مسیر زیرپوشه‌ها رو جدا بده.`);
+  for (const f of files) {
+    const d = await fetch(`https://api.github.com/repos/${env.GITHUB_REPO}/contents/${f.path}`, {
+      method: "DELETE", headers: ghHeaders(env), body: JSON.stringify({ message: "remove " + f.path + " from public repo", sha: f.sha, branch }),
+    });
+    if (!d.ok) throw new Error(`حذف ${f.path} ناموفق: ${d.status}`);
+  }
+  return send(env, chatId, `🗑 ${files.length} فایل از ریپوی public پاک شد: ${path}\n(از تاریخچه‌ی git پاک نمی‌شه، فقط از نسخه‌ی فعلی.)`);
+}
+
 // ---------- تمیزکاری ریپوی public: لاگ‌ها، artifactها، ران‌های قدیمی ----------
 function b64ToText(b64) {
   const bin = atob(String(b64).replace(/\n/g, ""));
@@ -593,6 +638,7 @@ async function onCommand(env, chatId, st, cmd, text) {
         "/go canvas split ← تکه‌های ۴۵ مگی (با ZArchiver یا 7-Zip بازشون کن)",
         "/go remotion ← رندر Remotion مثل قبل",
         "/assets ep1v2 ← فایل‌های صوتی ذخیره‌شده‌ی اون قسمت",
+        "/rmpublic chalk ← پاک‌کردن پوشه‌ی قدیمی موتور از ریپوی public (بعد از مهاجرت)",
         "/cleanlogs ← پاک‌کردن لاگ‌ها و artifactهای قدیمی ریپوی public + پنهان‌کردن جواب تلگرام توی لاگ‌ها",
         "/comp ← دیدن یا عوض کردن قالب (MainComp یا CaveFire)",
         "/models ← عوض کردن مدل (سقف رایگان هر مدل کنارش نوشته)",
@@ -604,7 +650,8 @@ async function onCommand(env, chatId, st, cmd, text) {
         "",
         "فایل بفرستی:",
         "• ZIP ← باز میشه و روی پروژه اعمال میشه",
-        "• یک فایل ← توی کپشن مسیرش رو بنویس (مثلاً src/config.ts)",
+        "• یک فایل ← کپشن = مسیرش. فقط worker/، .github/ و پروژه‌ی Remotion public می‌شن؛ بقیه خودکار می‌رن ریپوی private (یا private:مسیر)",
+        "• zip موتور مرد گچی ← کپشن: engine → توی ریپوی private باز می‌شه",
         "• صدا (mp3/m4a/wav/...) ← کپشن: ep1v2 یا ep1v2/main.wav → می‌ره توی ریپوی private، هیچ‌وقت public نمی‌شه (تا ۱۸ مگ)",
       ].join("\n")
     );
@@ -726,6 +773,7 @@ async function onCommand(env, chatId, st, cmd, text) {
     return send(env, chatId, "موتور ناشناخته. /go remotion یا /go canvas");
   }
   if (cmd === "/cleanlogs") return cleanLogs(env, chatId);
+  if (cmd === "/rmpublic") return rmPublic(env, chatId, text.trim().split(/\s+/)[1]);
   if (cmd === "/assets") {
     return listAssets(env, chatId, text.trim().split(/\s+/)[1]);
   }
@@ -738,29 +786,35 @@ async function onDocument(env, chatId, msg) {
   if (doc.file_size && doc.file_size > 18 * 1024 * 1024) {
     return send(env, chatId, "فایل بزرگ‌تر از ۱۸ مگابایته و قابل دریافت نیست.");
   }
-  if ((msg.caption || "").trim().toLowerCase() === "worker") return selfUpdate(env, chatId, doc);
+  const capRaw = (msg.caption || "").trim();
+  if (capRaw.toLowerCase() === "worker") return selfUpdate(env, chatId, doc);
   const isZip = name.toLowerCase().endsWith(".zip");
-  let path;
+  if (isZip && /^(engine|private)$/i.test(capRaw)) return onPrivateZip(env, chatId, doc, name);
+  let path, repo;
   if (isZip) {
     path = `uploads/${Date.now()}.zip`;
   } else {
-    path = (msg.caption || "").trim().replace(/^\/+/, "");
-    if (!path || path.includes("..")) {
-      return send(env, chatId, "برای فایل تکی، مسیرش رو توی کپشن بنویس (مثلاً src/scenes/Scene1.tsx) و دوباره بفرست.");
+    let cap = capRaw.replace(/^\/+/, "");
+    let forcePrivate = false;
+    if (/^private:/i.test(cap)) { forcePrivate = true; cap = cap.replace(/^private:\s*/i, "").replace(/^\/+/, ""); }
+    if (!cap || cap.includes("..")) {
+      return send(env, chatId, "برای فایل تکی، مسیرش رو توی کپشن بنویس (مثلاً engine/chalk/src/template.html) و دوباره بفرست.");
     }
+    path = cap;
+    if (forcePrivate || !isPublicPath(path)) repo = assetsRepo(env);
   }
   const info = await tg(env, "getFile", { file_id: doc.file_id });
   if (!info.ok) throw new Error("تلگرام فایل رو نداد: " + JSON.stringify(info).slice(0, 200));
   const fr = await fetch(`https://api.telegram.org/file/bot${env.TELEGRAM_BOT_TOKEN}/${info.result.file_path}`);
   if (!fr.ok) throw new Error("دانلود فایل از تلگرام ناموفق: " + fr.status);
   const bytes = new Uint8Array(await fr.arrayBuffer());
-  await githubPut(env, path, toB64(bytes), "upload from telegram: " + path);
+  await githubPut(env, path, toB64(bytes), "upload from telegram: " + path, repo);
   return send(
     env,
     chatId,
     isZip
-      ? "✅ ZIP ذخیره شد. موقع رندر باز و اعمال میشه. برای شروع /go بزن."
-      : `✅ ذخیره شد: ${path}\nبرای رندر /go بزن.`
+      ? "✅ ZIP (پروژه‌ی Remotion، ریپوی public) ذخیره شد. موقع رندر باز و اعمال میشه. برای موتور مرد گچی کپشن zip رو بذار: engine"
+      : `✅ ذخیره شد (${repo ? "ریپوی private 🔒" : "ریپوی public"}): ${path}`
   );
 }
 
