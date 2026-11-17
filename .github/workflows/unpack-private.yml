@@ -1,0 +1,55 @@
+# unpack-private.yml  VERSION v1: opens a zip that the bot stored in the PRIVATE repo (inbox/)
+name: Unpack Private
+
+on:
+  workflow_dispatch:
+    inputs:
+      name:
+        description: "zip file name inside inbox/ of the private repo"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  unpack:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get private repo (write access)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/motion-assets
+          token: ${{ secrets.ASSETS_WRITE_TOKEN }}
+          path: priv
+      - name: Unpack
+        working-directory: priv
+        env:
+          NAME: ${{ inputs.name }}
+        run: |
+          set -e
+          case "$NAME" in (""|*[!A-Za-z0-9._-]*) echo "bad name"; exit 1;; esac
+          test -f "inbox/$NAME"
+          rm -rf /tmp/x && mkdir -p /tmp/x
+          unzip -q -o "inbox/$NAME" -d /tmp/x
+          if [ -n "$(find /tmp/x \( -name '.git*' -o -path '*/.github/*' -o -type l \) -print -quit)" ]; then
+            echo "zip must not contain .git, .github or symlinks"; exit 1
+          fi
+          cp -a /tmp/x/. .
+          git rm -q "inbox/$NAME"
+          git add -A
+          git config user.name "motion-bot"
+          git config user.email "motion-bot@users.noreply.github.com"
+          N=$(git diff --cached --name-only | wc -l)
+          git commit -q -m "update from zip ($N files)" || true
+          git push -q
+          echo "N=$N" >> "$GITHUB_ENV"
+          echo "unpacked, files changed: $N"
+      - name: Tell me on Telegram
+        if: ${{ always() }}
+        env:
+          TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+          OK: ${{ job.status }}
+        run: |
+          if [ "$OK" = "success" ]; then T="✅ فایل‌های ریپوی private آپدیت شد (${N:-0} فایل)."; else T="❌ باز کردن zip خطا داد. لاگ: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"; fi
+          curl -sS "https://api.telegram.org/bot$TOKEN/sendMessage" -d chat_id="$CHAT" --data-urlencode "text=$T" > /dev/null
