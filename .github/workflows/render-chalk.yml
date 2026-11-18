@@ -1,11 +1,11 @@
-# render-chalk.yml  VERSION v4 (engine and audio live in the PRIVATE repo motion-assets)
+# render-chalk.yml  VERSION v5 (library: engine/chalk/lib + episodes/<ep>/ in the PRIVATE repo motion-assets)
 name: Render Chalk
 
 on:
   workflow_dispatch:
     inputs:
       episode:
-        description: "Episode folder in the private assets repo (e.g. ep1v2)"
+        description: "Episode folder in the private repo: episodes/<ep>/ needs scenes.js, timing.json, mix.m4a"
         default: "ep1v2"
       start:
         description: "Start second (0 = from the beginning)"
@@ -52,9 +52,9 @@ jobs:
           path: priv
           persist-credentials: false
       - id: p
-        working-directory: priv/engine/chalk/src
+        working-directory: priv/engine/chalk
         run: |
-          echo "matrix=$(python3 plan.py '${{ inputs.shards }}' '${{ inputs.start }}' '${{ inputs.seconds }}')" >> "$GITHUB_OUTPUT"
+          echo "matrix=$(python3 plan.py '${{ inputs.shards }}' '${{ inputs.start }}' '${{ inputs.seconds }}' '${{ inputs.episode }}')" >> "$GITHUB_OUTPUT"
 
   shard:
     needs: plan
@@ -83,10 +83,10 @@ jobs:
           pip install playwright
           python -m playwright install --with-deps chromium
       - name: Build page
-        working-directory: priv/engine/chalk/src
-        run: python3 build_html.py
+        working-directory: priv/engine/chalk
+        run: python3 build_html.py ${{ inputs.episode }}
       - name: Render shard
-        working-directory: priv/engine/chalk/src
+        working-directory: priv/engine/chalk
         env:
           SCALE: ${{ inputs.scale }}
           NOSUBS: ${{ inputs.audio == 'none' && '1' || '0' }}
