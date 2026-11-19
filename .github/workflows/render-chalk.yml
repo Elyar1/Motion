@@ -1,4 +1,4 @@
-# render-chalk.yml  VERSION v6 (live progress message + library: engine/chalk/lib + episodes/<ep>/ in the PRIVATE repo motion-assets)
+# render-chalk.yml  VERSION v5 (library: engine/chalk/lib + episodes/<ep>/ in the PRIVATE repo motion-assets)
 name: Render Chalk
 
 on:
@@ -39,95 +39,6 @@ permissions:
   contents: read
 
 jobs:
-  progress:
-    runs-on: ubuntu-latest
-    timeout-minutes: 40
-    permissions:
-      actions: read
-    steps:
-      - name: Live progress message in Telegram (edits one message)
-        continue-on-error: true
-        env:
-          TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          RUN_ID: ${{ github.run_id }}
-        run: |
-          python3 - <<'PY'
-          import os, json, time, urllib.request, urllib.parse
-          TOKEN = os.environ["TOKEN"]; CHAT = os.environ["CHAT"]; GH = os.environ["GH_TOKEN"]
-          REPO = os.environ["REPO"]; RUN = os.environ["RUN_ID"]
-          FA = str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")
-          def tg(method, **kw):
-              req = urllib.request.Request("https://api.telegram.org/bot%s/%s" % (TOKEN, method), data=urllib.parse.urlencode(kw).encode())
-              with urllib.request.urlopen(req, timeout=20) as r:
-                  return json.load(r)
-          def jobs():
-              req = urllib.request.Request("https://api.github.com/repos/%s/actions/runs/%s/jobs?per_page=50" % (REPO, RUN),
-                                           headers={"Authorization": "Bearer " + GH, "Accept": "application/vnd.github+json"})
-              with urllib.request.urlopen(req, timeout=20) as r:
-                  return json.load(r)["jobs"]
-          def frac(j):
-              if j["status"] == "completed":
-                  return 1.0
-              st = j.get("steps") or []
-              return sum(1 for s in st if s["status"] == "completed") / len(st) if st else 0.0
-          def fa(n): return str(n).translate(FA)
-          def clock(s): return fa(int(s // 60)) + ":" + fa("%02d" % int(s % 60))
-          LAST_STEP = {"Install tools": "آماده‌سازی نهایی", "Decrypt, join, add audio": "چسباندن تکه‌ها و صدا", "Deliver": "ارسال ویدیو"}
-          def build(js, t0, head):
-              plan = [j for j in js if j["name"] == "plan"]
-              shards = [j for j in js if j["name"].startswith("shard")]
-              fin = [j for j in js if j["name"] == "finish"]
-              p = 0.05 * (frac(plan[0]) if plan else 0)
-              if shards: p += 0.75 * sum(frac(j) for j in shards) / len(shards)
-              if fin: p += 0.20 * frac(fin[0])
-              p = min(100, int(p * 100))
-              done = sum(1 for j in shards if j["status"] == "completed")
-              if fin and fin[0]["status"] == "in_progress":
-                  cur = [s["name"] for s in (fin[0].get("steps") or []) if s["status"] == "in_progress"]
-                  stage = LAST_STEP.get(cur[0], "مرحله‌ی آخر") if cur else "مرحله‌ی آخر"
-              elif shards:
-                  stage = "رندر موازی: %s از %s شارد" % (fa(done), fa(len(shards)))
-              else:
-                  stage = "آماده‌سازی"
-              bar = "█" * (p // 10) + "░" * (10 - p // 10)
-              return "%s\n%s %s٪\n%s\n⏱ %s" % (head, bar, fa(p), stage, clock(time.time() - t0)), p
-          def run():
-              t0 = time.time()
-              head = "🎬 رندر مرد گچی"
-              mid = tg("sendMessage", chat_id=CHAT, text=head + "\n░░░░░░░░░░ ۰٪\nشروع شد…")["result"]["message_id"]
-              last, last_t = "", 0.0
-              while time.time() - t0 < 40 * 60:
-                  try:
-                      js = jobs()
-                  except Exception:
-                      time.sleep(8); continue
-                  core = [j for j in js if j["name"] in ("plan", "finish") or j["name"].startswith("shard")]
-                  bad = [j for j in core if j.get("conclusion") in ("failure", "cancelled")]
-                  fin = [j for j in js if j["name"] == "finish"]
-                  text, p = build(js, t0, head)
-                  if bad:
-                      cancelled = any(j.get("conclusion") == "cancelled" for j in bad)
-                      text = ("⛔ رندر لغو شد" if cancelled else "❌ رندر خطا خورد") + "\n⏱ " + clock(time.time() - t0)
-                  elif fin and fin[0]["status"] == "completed" and fin[0].get("conclusion") == "success":
-                      text = "✅ رندر تموم شد، ویدیو فرستاده شد\n██████████ ۱۰۰٪\n⏱ " + clock(time.time() - t0)
-                  if text != last and time.time() - last_t >= 4:
-                      try:
-                          tg("editMessageText", chat_id=CHAT, message_id=mid, text=text)
-                      except Exception:
-                          pass
-                      last, last_t = text, time.time()
-                  if bad or (fin and fin[0]["status"] == "completed"):
-                      return
-                  time.sleep(6)
-          try:
-              run()
-          except Exception:
-              pass
-          PY
-
   plan:
     runs-on: ubuntu-latest
     outputs:
