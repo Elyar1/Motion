@@ -1,4 +1,4 @@
-# render-chalk.yml  VERSION v6 (live progress message + library: engine/chalk/lib + episodes/<ep>/ in the PRIVATE repo motion-assets)
+# render-chalk.yml  VERSION v7 (live progress message + library: engine/chalk/lib + episodes/<ep>/ in the PRIVATE repo motion-assets)
 name: Render Chalk
 
 on:
@@ -24,8 +24,11 @@ on:
         type: choice
         options: ["1080", "720"]
       crf:
-        description: "x264 quality (lower = better and bigger, 24 = current)"
-        default: "24"
+        description: "x264 quality (lower = better and bigger, 18 = current)"
+        default: "18"
+      maxrate:
+        description: "Bitrate cap in Mbit/s, integer 4-40 (ignored for deliver=release). Raise it so a low crf can actually use more bits."
+        default: "9"
       shards:
         description: "Parallel jobs"
         default: "6"
@@ -194,7 +197,7 @@ jobs:
         env:
           SCALE: ${{ inputs.scale }}
           NOSUBS: ${{ inputs.audio == 'none' && '1' || '0' }}
-          MAXRATE: ${{ inputs.deliver == 'release' && '40M' || '9M' }}
+          MAXRATE: ${{ inputs.deliver == 'release' && '40M' || format('{0}M', inputs.maxrate) }}
         run: python3 render_shard.py ${{ matrix.s }} ${{ matrix.e }} /tmp/chunk.mp4 "${{ inputs.deliver == 'release' && '16' || inputs.crf }}"
       - name: Encrypt chunk (repo is public; artifacts are not private)
         env:
