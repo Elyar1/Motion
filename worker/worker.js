@@ -7,7 +7,7 @@ const MODELS = {
   "groq-gpt-oss": { provider: "openai", base: "https://api.groq.com/openai/v1", keyName: "GROQ_API_KEY", id: "openai/gpt-oss-120b", label: "Groq GPT-OSS 120B", limit: 1000 },
   "openrouter-free": { provider: "openai", base: "https://openrouter.ai/api/v1", keyName: "OPENROUTER_API_KEY", id: "google/gemma-4-31b-it:free", label: "OpenRouter (Gemma رایگان)", limit: 50 },
 };
-const VERSION = "2026-11-22-a";
+const VERSION = "2026-11-22-b";
 const DEFAULT_MODEL = "g:gemini-3.5-flash-lite";
 const FALLBACK_GEMINI = ["gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-2.5-flash"];
 
@@ -350,8 +350,8 @@ async function dispatchWorkflow(env, file, inputs) {
     throw new Error(`Dispatch ${r.status}: ${t.slice(0, 300)}`);
   }
 }
-function parseChalkArgs(tokens, lastEp) {
-  const o = { episode: lastEp, start: "0", seconds: "0", audio: "mix", scale: "1080", crf: "18", maxrate: "9", shards: "6", deliver: "tg" };
+function parseChalkArgs(tokens, lastEp, cfg) {
+  const o = { episode: lastEp, start: "0", seconds: "0", audio: "mix", scale: "1080", crf: (cfg && cfg.crf) || "18", maxrate: (cfg && cfg.maxrate) || "9", shards: "6", deliver: "tg" };
   const nums = [];
   for (const t of tokens) {
     const low = t.toLowerCase();
@@ -389,8 +389,34 @@ function parseChalkArgs(tokens, lastEp) {
   if (!["tg", "release", "split"].includes(o.deliver)) return { error: "deliver فقط tg یا release یا split." };
   return { inputs: o };
 }
+// ---------- تنظیم کیفیت رندر (دکمه‌ها؛ ذخیره در KV) ----------
+const Q_CRF = ["16", "18", "20", "22", "24", "28"];
+const Q_MR = ["9", "14", "20", "30"];
+async function qualityCfg(env) {
+  const crf = await env.KV.get("q:crf");
+  const maxrate = await env.KV.get("q:maxrate");
+  return { crf: Q_CRF.includes(crf) ? crf : "18", maxrate: Q_MR.includes(maxrate) ? maxrate : "9" };
+}
+function qualityText(c) {
+  return [
+    "🎚 کیفیت رندر",
+    `crf ${c.crf} (کمتر = کیفیت بیشتر و حجم بیشتر)`,
+    `سقف بیت‌ریت ${c.maxrate}M (مگابیت بر ثانیه)`,
+    "",
+    "این مقدارها برای همه‌ی /go های بعدی ذخیره می‌شن. تک‌بار: /go canvas crf=20 maxrate=14",
+    "مستر (master) همیشه crf 16 و سقف 40M داره و به این تنظیم وابسته نیست.",
+  ].join("\n");
+}
+function qualityKeyboard(c) {
+  const mk = (kind, v, cur) => ({ text: (v === cur ? "✅ " : "") + (kind === "crf" ? "crf " + v : v + "M"), callback_data: `q:${kind}:${v}` });
+  return [
+    Q_CRF.slice(0, 3).map((v) => mk("crf", v, c.crf)),
+    Q_CRF.slice(3).map((v) => mk("crf", v, c.crf)),
+    Q_MR.map((v) => mk("maxrate", v, c.maxrate)),
+  ];
+}
 async function runCanvas(env, chatId, tokens) {
-  const p = parseChalkArgs(tokens, await lastEpisode(env));
+  const p = parseChalkArgs(tokens, await lastEpisode(env), await qualityCfg(env));
   if (p.error) return send(env, chatId, "⚠️ " + p.error + "\n\nمثال: /go canvas ep1v2\n/go canvas preview 8.6 17.4\n/go canvas ep1v2 master");
   const o = p.inputs;
   await dispatchWorkflow(env, "render-chalk.yml", o);
@@ -572,6 +598,14 @@ async function handle(update, env) {
       }
       return runCanvas(env, chatId, []);
     }
+    if (cb.data && cb.data.startsWith("q:")) {
+      const [, kind, v] = cb.data.split(":");
+      if ((kind === "crf" && Q_CRF.includes(v)) || (kind === "maxrate" && Q_MR.includes(v))) await env.KV.put("q:" + kind, v);
+      await tg(env, "answerCallbackQuery", { callback_query_id: cb.id });
+      const c = await qualityCfg(env);
+      await tg(env, "editMessageText", { chat_id: chatId, message_id: cb.message.message_id, text: qualityText(c), reply_markup: { inline_keyboard: qualityKeyboard(c) } });
+      return;
+    }
     if (cb.data && (cb.data.startsWith("g:") || MODELS[cb.data])) {
       const st = await load(env, chatId);
       st.model = cb.data;
@@ -639,6 +673,7 @@ async function onCommand(env, chatId, st, cmd, text) {
         "/go canvas master ← مستر باکیفیت توی گیت‌هاب private + پیش‌نمایش توی تلگرام",
         "/go canvas split ← تکه‌های ۴۵ مگی (با ZArchiver یا 7-Zip بازشون کن)",
         "/go remotion ← رندر Remotion مثل قبل",
+        "/quality ← دکمه‌های crf و سقف بیت‌ریت (ذخیره می‌شه)",
         "/assets ep1v2 ← فایل‌های صوتی ذخیره‌شده‌ی اون قسمت",
         "/rmpublic chalk ← پاک‌کردن پوشه‌ی قدیمی موتور از ریپوی public (بعد از مهاجرت)",
         "/cleanlogs ← پاک‌کردن لاگ‌ها و artifactهای قدیمی ریپوی public + پنهان‌کردن جواب تلگرام توی لاگ‌ها",
@@ -699,6 +734,10 @@ async function onCommand(env, chatId, st, cmd, text) {
       headers: ghHeaders(env),
     });
     return send(env, chatId, r.status === 202 ? "⛔ درخواست لغو رندر ارسال شد." : `لغو نشد (HTTP ${r.status}).`);
+  }
+  if (cmd === "/quality" || cmd === "/q") {
+    const c = await qualityCfg(env);
+    return send(env, chatId, qualityText(c), { reply_markup: { inline_keyboard: qualityKeyboard(c) } });
   }
   if (cmd === "/version") {
     return send(env, chatId, "نسخه‌ی در حال اجرای بات: " + VERSION);
