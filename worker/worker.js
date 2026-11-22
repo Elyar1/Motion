@@ -7,7 +7,7 @@ const MODELS = {
   "groq-gpt-oss": { provider: "openai", base: "https://api.groq.com/openai/v1", keyName: "GROQ_API_KEY", id: "openai/gpt-oss-120b", label: "Groq GPT-OSS 120B", limit: 1000 },
   "openrouter-free": { provider: "openai", base: "https://openrouter.ai/api/v1", keyName: "OPENROUTER_API_KEY", id: "google/gemma-4-31b-it:free", label: "OpenRouter (Gemma رایگان)", limit: 50 },
 };
-const VERSION = "2026-11-22-c";
+const VERSION = "2026-11-23-a";
 const DEFAULT_MODEL = "g:gemini-3.5-flash-lite";
 const FALLBACK_GEMINI = ["gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-2.5-flash"];
 
@@ -689,7 +689,7 @@ async function onCommand(env, chatId, st, cmd, text) {
         "• فایل worker.js با کپشن worker ← خود بات رو آپدیت می‌کنه",
         "",
         "فایل بفرستی:",
-        "• ZIP ← باز میشه و روی پروژه اعمال میشه",
+        "• ZIP پروژه‌ی Remotion ← کپشن: remotion → public می‌شود. zip بدون کپشن رد می‌شود",
         "• یک فایل ← کپشن = مسیرش. فقط worker/، .github/ و پروژه‌ی Remotion public می‌شن؛ بقیه خودکار می‌رن ریپوی private (یا private:مسیر)",
         "• zip موتور مرد گچی ← کپشن: engine → توی ریپوی private باز می‌شه",
         "• صدا (mp3/m4a/wav/...) ← کپشن: ep1v2 یا ep1v2/main.wav → می‌ره توی ریپوی private، هیچ‌وقت public نمی‌شه (تا ۱۸ مگ)",
@@ -836,6 +836,9 @@ async function onDocument(env, chatId, msg) {
   if (isZip && /^(engine|private)$/i.test(capRaw)) return onPrivateZip(env, chatId, doc, name);
   let path, repo;
   if (isZip) {
+    if (!/^remotion$/i.test(capRaw)) {
+      return send(env, chatId, "⛔ zip بدون کپشن درست ذخیره نشد (ریپوی public امنیت ندارد). دوباره بفرست با کپشن: engine ← موتور مرد گچی (private). یا کپشن: remotion ← پروژه‌ی Remotion (public).");
+    }
     path = `uploads/${Date.now()}.zip`;
   } else {
     let cap = capRaw.replace(/^\/+/, "");
@@ -857,7 +860,7 @@ async function onDocument(env, chatId, msg) {
     env,
     chatId,
     isZip
-      ? "✅ ZIP (پروژه‌ی Remotion، ریپوی public) ذخیره شد. موقع رندر باز و اعمال میشه. برای موتور مرد گچی کپشن zip رو بذار: engine"
+      ? "✅ ZIP (پروژه‌ی Remotion، ریپوی public) ذخیره شد. موقع رندر باز و اعمال میشه. برای موتور مرد گچی کپشن zip: engine"
       : `✅ ذخیره شد (${repo ? "ریپوی private 🔒" : "ریپوی public"}): ${path}`
   );
 }
