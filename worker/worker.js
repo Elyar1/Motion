@@ -7,7 +7,7 @@ const MODELS = {
   "groq-gpt-oss": { provider: "openai", base: "https://api.groq.com/openai/v1", keyName: "GROQ_API_KEY", id: "openai/gpt-oss-120b", label: "Groq GPT-OSS 120B", limit: 1000 },
   "openrouter-free": { provider: "openai", base: "https://openrouter.ai/api/v1", keyName: "OPENROUTER_API_KEY", id: "google/gemma-4-31b-it:free", label: "OpenRouter (Gemma رایگان)", limit: 50 },
 };
-const VERSION = "2026-11-22-b";
+const VERSION = "2026-11-22-c";
 const DEFAULT_MODEL = "g:gemini-3.5-flash-lite";
 const FALLBACK_GEMINI = ["gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-2.5-flash"];
 
@@ -351,7 +351,7 @@ async function dispatchWorkflow(env, file, inputs) {
   }
 }
 function parseChalkArgs(tokens, lastEp, cfg) {
-  const o = { episode: lastEp, start: "0", seconds: "0", audio: "mix", scale: "1080", crf: (cfg && cfg.crf) || "18", maxrate: (cfg && cfg.maxrate) || "9", shards: "6", deliver: "tg" };
+  const o = { episode: lastEp, start: "0", seconds: "0", audio: "mix", scale: "1080", crf: (cfg && cfg.crf) || "18", maxrate: (cfg && cfg.maxrate) || "14", shards: "6", deliver: "tg" };
   const nums = [];
   for (const t of tokens) {
     const low = t.toLowerCase();
@@ -390,28 +390,31 @@ function parseChalkArgs(tokens, lastEp, cfg) {
   return { inputs: o };
 }
 // ---------- تنظیم کیفیت رندر (دکمه‌ها؛ ذخیره در KV) ----------
-const Q_CRF = ["16", "18", "20", "22", "24", "28"];
+const Q_CRF = ["14", "16", "18", "20", "22", "24", "28"];
 const Q_MR = ["9", "14", "20", "30"];
 async function qualityCfg(env) {
   const crf = await env.KV.get("q:crf");
   const maxrate = await env.KV.get("q:maxrate");
-  return { crf: Q_CRF.includes(crf) ? crf : "18", maxrate: Q_MR.includes(maxrate) ? maxrate : "9" };
+  return { crf: Q_CRF.includes(crf) ? crf : "18", maxrate: Q_MR.includes(maxrate) ? maxrate : "14" };
 }
 function qualityText(c) {
   return [
     "🎚 کیفیت رندر",
-    `crf ${c.crf} (کمتر = کیفیت بیشتر و حجم بیشتر)`,
-    `سقف بیت‌ریت ${c.maxrate}M (مگابیت بر ثانیه)`,
+    `فشردگی (crf): ${c.crf} ← عدد کمتر یعنی کیفیت و حجم بیشتر`,
+    `سقف بیت‌ریت: ${c.maxrate}M ← مگابیت بر ثانیه`,
     "",
-    "این مقدارها برای همه‌ی /go های بعدی ذخیره می‌شن. تک‌بار: /go canvas crf=20 maxrate=14",
-    "مستر (master) همیشه crf 16 و سقف 40M داره و به این تنظیم وابسته نیست.",
+    "این دو مقدار برای همه‌ی رندرهای بعدی ذخیره می‌شن.",
+    "فقط برای یک بار؟ روی دستور بزن تا کپی بشه و عددها رو عوض کن:",
+    "<code>/go canvas crf=20 maxrate=14</code>",
+    "",
+    "مستر (master) همیشه با crf 16 و سقف 40M رندر می‌شه و به این تنظیم وابسته نیست.",
   ].join("\n");
 }
 function qualityKeyboard(c) {
   const mk = (kind, v, cur) => ({ text: (v === cur ? "✅ " : "") + (kind === "crf" ? "crf " + v : v + "M"), callback_data: `q:${kind}:${v}` });
   return [
-    Q_CRF.slice(0, 3).map((v) => mk("crf", v, c.crf)),
-    Q_CRF.slice(3).map((v) => mk("crf", v, c.crf)),
+    Q_CRF.slice(0, 4).map((v) => mk("crf", v, c.crf)),
+    Q_CRF.slice(4).map((v) => mk("crf", v, c.crf)),
     Q_MR.map((v) => mk("maxrate", v, c.maxrate)),
   ];
 }
@@ -603,7 +606,7 @@ async function handle(update, env) {
       if ((kind === "crf" && Q_CRF.includes(v)) || (kind === "maxrate" && Q_MR.includes(v))) await env.KV.put("q:" + kind, v);
       await tg(env, "answerCallbackQuery", { callback_query_id: cb.id });
       const c = await qualityCfg(env);
-      await tg(env, "editMessageText", { chat_id: chatId, message_id: cb.message.message_id, text: qualityText(c), reply_markup: { inline_keyboard: qualityKeyboard(c) } });
+      await tg(env, "editMessageText", { chat_id: chatId, message_id: cb.message.message_id, text: qualityText(c), parse_mode: "HTML", reply_markup: { inline_keyboard: qualityKeyboard(c) } });
       return;
     }
     if (cb.data && (cb.data.startsWith("g:") || MODELS[cb.data])) {
@@ -737,7 +740,7 @@ async function onCommand(env, chatId, st, cmd, text) {
   }
   if (cmd === "/quality" || cmd === "/q") {
     const c = await qualityCfg(env);
-    return send(env, chatId, qualityText(c), { reply_markup: { inline_keyboard: qualityKeyboard(c) } });
+    return send(env, chatId, qualityText(c), { parse_mode: "HTML", reply_markup: { inline_keyboard: qualityKeyboard(c) } });
   }
   if (cmd === "/version") {
     return send(env, chatId, "نسخه‌ی در حال اجرای بات: " + VERSION);
