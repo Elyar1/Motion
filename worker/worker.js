@@ -7,7 +7,7 @@ const MODELS = {
   "groq-gpt-oss": { provider: "openai", base: "https://api.groq.com/openai/v1", keyName: "GROQ_API_KEY", id: "openai/gpt-oss-120b", label: "Groq GPT-OSS 120B", limit: 1000 },
   "openrouter-free": { provider: "openai", base: "https://openrouter.ai/api/v1", keyName: "OPENROUTER_API_KEY", id: "google/gemma-4-31b-it:free", label: "OpenRouter (Gemma رایگان)", limit: 50 },
 };
-const VERSION = "2026-11-16-j";
+const VERSION = "2026-11-22-a";
 const DEFAULT_MODEL = "g:gemini-3.5-flash-lite";
 const FALLBACK_GEMINI = ["gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-2.5-flash"];
 
@@ -351,7 +351,7 @@ async function dispatchWorkflow(env, file, inputs) {
   }
 }
 function parseChalkArgs(tokens, lastEp) {
-  const o = { episode: lastEp, start: "0", seconds: "0", audio: "mix", scale: "1080", crf: "24", shards: "6", deliver: "tg" };
+  const o = { episode: lastEp, start: "0", seconds: "0", audio: "mix", scale: "1080", crf: "18", maxrate: "9", shards: "6", deliver: "tg" };
   const nums = [];
   for (const t of tokens) {
     const low = t.toLowerCase();
@@ -365,6 +365,7 @@ function parseChalkArgs(tokens, lastEp) {
       if (k === "start" || k === "from") o.start = v;
       else if (k === "sec" || k === "seconds" || k === "len") o.seconds = v;
       else if (k === "crf") o.crf = v;
+      else if (k === "maxrate") o.maxrate = v;
       else if (k === "scale") o.scale = v;
       else if (k === "audio") o.audio = v;
       else if (k === "shards") o.shards = v;
@@ -381,6 +382,7 @@ function parseChalkArgs(tokens, lastEp) {
   const n = (v) => Number(v);
   if (!(n(o.start) >= 0) || !(n(o.seconds) >= 0)) return { error: "شروع و مدت باید عدد باشن." };
   if (!(Number.isInteger(n(o.crf)) && n(o.crf) >= 14 && n(o.crf) <= 35)) return { error: "crf باید عدد بین ۱۴ تا ۳۵ باشه." };
+  if (!(Number.isInteger(n(o.maxrate)) && n(o.maxrate) >= 4 && n(o.maxrate) <= 40)) return { error: "maxrate (مگابیت بر ثانیه) باید عدد صحیح بین ۴ تا ۴۰ باشه." };
   if (!["1080", "720"].includes(o.scale)) return { error: "scale فقط 1080 یا 720." };
   if (!["mix", "none"].includes(o.audio)) return { error: "audio فقط mix یا none." };
   if (!(Number.isInteger(n(o.shards)) && n(o.shards) >= 1 && n(o.shards) <= 12)) return { error: "shards بین ۱ تا ۱۲." };
@@ -399,7 +401,7 @@ async function runCanvas(env, chatId, tokens) {
     "🚀 رندر مرد گچی شروع شد",
     `قسمت: ${o.episode}`,
     `بازه: ${range}`,
-    `کیفیت: ${o.scale}p · crf ${o.crf} · صدا: ${o.audio === "mix" ? "دارد" : "ندارد (پیش‌نمایش بی‌زیرنویس)"}`,
+    `کیفیت: ${o.scale}p · crf ${o.crf} · سقف ${o.maxrate}M · صدا: ${o.audio === "mix" ? "دارد" : "ندارد (پیش‌نمایش بی‌زیرنویس)"}`,
     `تحویل: ${dl}`,
     "/status برای وضعیت · /cancel برای لغو",
   ].join("\n"));
