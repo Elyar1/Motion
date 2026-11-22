@@ -1,4 +1,4 @@
-# render-chalk.yml  VERSION v7 (live progress message + library: engine/chalk/lib + episodes/<ep>/ in the PRIVATE repo motion-assets)
+# render-chalk.yml  VERSION v8 (live progress message + library: engine/chalk/lib + episodes/<ep>/ in the PRIVATE repo motion-assets)
 name: Render Chalk
 
 on:
@@ -33,7 +33,7 @@ on:
         description: "Parallel jobs"
         default: "6"
       deliver:
-        description: "tg = Telegram (max 49 MB) | release = master in private GitHub release + preview in Telegram | split = 45 MB parts in Telegram"
+        description: "tg = Telegram (max 49 MB; bigger = automatic master + compressed preview) | release = master in private GitHub release + preview in Telegram | split = 45 MB parts in Telegram"
         default: "tg"
         type: choice
         options: ["tg", "release", "split"]
@@ -275,18 +275,12 @@ jobs:
           MB=$(( $(stat -c%s /tmp/master.mp4) / 1048576 ))
           tg_msg() { curl -sS "https://api.telegram.org/bot$TOKEN/sendMessage" -d chat_id="$CHAT" --data-urlencode "text=$1" > /dev/null; }
           tg_video() { curl -sS -X POST "https://api.telegram.org/bot$TOKEN/sendVideo" -F chat_id="$CHAT" -F video=@"$1" -F supports_streaming=true -F caption="$2" > /dev/null; }
-          case "$DELIVER" in
-            tg)
-              if [ "$(stat -c%s /tmp/master.mp4)" -gt "$LIMIT" ]; then
-                tg_msg "رندر تموم شد ولی ${MB} مگابایته و تلگرام بالای ۵۰ نمیذاره. دوباره با master یا split بزن."
-              else
-                tg_video /tmp/master.mp4 "رندر مرد گچی ✅ (${DUR} ثانیه · ${SCALE}p · crf ${CRF} · ${MB} MB)"
-              fi
-              ;;
-            release)
+          do_release() {
               C="$CRF"
+              D=${DUR:-1}; [ "$D" -ge 1 ] || D=1
+              TB=$(( (LIMIT*8/D - 200000) * 9 / 10 )); [ "$TB" -le 9000000 ] || TB=9000000; [ "$TB" -ge 500000 ] || TB=500000
               for i in 1 2 3; do
-                ffmpeg -y -loglevel error -i /tmp/master.mp4 -c:v libx264 -preset veryfast -crf "$C" -maxrate 9M -bufsize 18M -pix_fmt yuv420p -colorspace bt709 -color_primaries bt709 -color_trc bt709 -c:a copy -movflags +faststart /tmp/preview.mp4
+                ffmpeg -y -loglevel error -i /tmp/master.mp4 -c:v libx264 -preset veryfast -crf "$C" -maxrate "$TB" -bufsize "$((TB*2))" -pix_fmt yuv420p -colorspace bt709 -color_primaries bt709 -color_trc bt709 -c:a copy -movflags +faststart /tmp/preview.mp4
                 [ "$(stat -c%s /tmp/preview.mp4)" -le "$LIMIT" ] && break
                 C=$((C+3))
               done
@@ -302,6 +296,18 @@ jobs:
               fi
               NL=$'\n'
               tg_video /tmp/preview.mp4 "پیش‌نمایش ✅ (${DUR} ثانیه · crf ${C})${NL}${NOTE}"
+          }
+          case "$DELIVER" in
+            tg)
+              if [ "$(stat -c%s /tmp/master.mp4)" -gt "$LIMIT" ]; then
+                tg_msg "حجم ویدیو ${MB} مگ شد و بالای ۵۰ مگ تلگرامه. خودکار مستر رو توی گیت‌هاب (private) می‌ذارم و پیش‌نمایش فشرده می‌فرستم."
+                do_release
+              else
+                tg_video /tmp/master.mp4 "رندر مرد گچی ✅ (${DUR} ثانیه · ${SCALE}p · crf ${CRF} · ${MB} MB)"
+              fi
+              ;;
+            release)
+              do_release
               ;;
             split)
               mkdir -p /tmp/parts && cd /tmp/parts
