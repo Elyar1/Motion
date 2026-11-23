@@ -27,8 +27,13 @@ jobs:
             -H "Authorization: Bearer $CF_API_TOKEN" \
             -F 'metadata={"main_module":"worker.js","compatibility_date":"2025-11-01","keep_bindings":["secret_text","plain_text","kv_namespace","json"]};type=application/json' \
             -F 'worker.js=@worker/worker.js;filename=worker.js;type=application/javascript+module')
-          echo "$RESP"
-          echo "$RESP" | grep -q '"success":true'
+          # لاگ public است: جواب کامل Cloudflare چاپ نمی‌شود؛ فقط success و (در خطا) errors
+          OK=$(echo "$RESP" | jq -r '.success' 2>/dev/null || echo unknown)
+          echo "success=$OK"
+          if [ "$OK" != "true" ]; then
+            echo "$RESP" | jq -c '.errors' 2>/dev/null || echo "response is not valid JSON"
+            exit 1
+          fi
 
       - name: Telegram OK
         if: success()
