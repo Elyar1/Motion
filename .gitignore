@@ -1,0 +1,37 @@
+# secrets
+.env
+.env.*
+*.env
+*.pem
+*.key
+
+# sessions / cookies / state
+state.json
+*state.json
+cookies*.json
+session*
+*.session
+storage_state.json
+auth.json
+
+# media & outputs
+*.mp4
+*.mov
+*.mkv
+*.webm
+*.png
+downloads/
+out/
+output/
+renders/
+
+# node / python
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
